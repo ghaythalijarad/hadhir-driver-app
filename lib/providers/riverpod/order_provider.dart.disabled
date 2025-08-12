@@ -1,0 +1,209 @@
+import 'package:flutter/foundation.dart';
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+import '../../models/order_model.dart';
+import '../../services/order_service.dart' as service;
+
+part 'order_provider.g.dart';
+
+class OrdersState {
+  final List<OrderModel> availableOrders;
+  final List<OrderModel> acceptedOrders;
+  final List<OrderModel> completedOrders;
+  final bool isLoading;
+  final String? errorMessage;
+
+  const OrdersState({
+    this.availableOrders = const [],
+    this.acceptedOrders = const [],
+    this.completedOrders = const [],
+    this.isLoading = false,
+    this.errorMessage,
+  });
+
+  OrdersState copyWith({
+    List<OrderModel>? availableOrders,
+    List<OrderModel>? acceptedOrders,
+    List<OrderModel>? completedOrders,
+    bool? isLoading,
+    String? errorMessage,
+  }) {
+    return OrdersState(
+      availableOrders: availableOrders ?? this.availableOrders,
+      acceptedOrders: acceptedOrders ?? this.acceptedOrders,
+      completedOrders: completedOrders ?? this.completedOrders,
+      isLoading: isLoading ?? this.isLoading,
+      errorMessage: errorMessage,
+    );
+  }
+}
+
+@Riverpod(keepAlive: true)
+class Orders extends _$Orders {
+  @override
+  OrdersState build() {
+    return const OrdersState();
+  }
+
+  Future<void> fetchAvailableOrders() async {
+    _setLoading(true);
+
+    try {
+      final result = await service.OrderService.getAvailableOrders();
+
+      if (result['success']) {
+        final orders = (result['data'] as List)
+            .map((order) => OrderModel.fromJson(order))
+            .toList();
+
+        state = state.copyWith(availableOrders: orders, errorMessage: null);
+      } else {
+        _setError(result['message']);
+      }
+    } catch (e) {
+      _setError('خطأ في جلب الطلبات المتاحة: ${e.toString()}');
+    } finally {
+      _setLoading(false);
+    }
+  }
+
+  Future<void> fetchAcceptedOrders() async {
+    _setLoading(true);
+
+    try {
+      final result = await service.OrderService.getAcceptedOrders();
+
+      if (result['success']) {
+        final orders = (result['data'] as List)
+            .map((order) => OrderModel.fromJson(order))
+            .toList();
+
+        state = state.copyWith(acceptedOrders: orders, errorMessage: null);
+      } else {
+        _setError(result['message']);
+      }
+    } catch (e) {
+      _setError('خطأ في جلب الطلبات المقبولة: ${e.toString()}');
+    } finally {
+      _setLoading(false);
+    }
+  }
+
+  Future<void> fetchCompletedOrders() async {
+    _setLoading(true);
+
+    try {
+      final result = await service.OrderService.getCompletedOrders();
+
+      if (result['success']) {
+        final orders = (result['data'] as List)
+            .map((order) => OrderModel.fromJson(order))
+            .toList();
+
+        state = state.copyWith(completedOrders: orders, errorMessage: null);
+      } else {
+        _setError(result['message']);
+      }
+    } catch (e) {
+      _setError('خطأ في جلب الطلبات المكتملة: ${e.toString()}');
+    } finally {
+      _setLoading(false);
+    }
+  }
+
+  Future<bool> acceptOrder(String orderId) async {
+    _setLoading(true);
+
+    try {
+      final result = await service.OrderService.acceptOrder(orderId);
+
+      if (result['success']) {
+        // Refresh the accepted orders list
+        await fetchAcceptedOrders();
+        // Remove the order from available orders
+        final updatedAvailableOrders = state.availableOrders
+            .where((order) => order.id != orderId)
+            .toList();
+
+        state = state.copyWith(
+          availableOrders: updatedAvailableOrders,
+          errorMessage: null,
+        );
+
+        return true;
+      } else {
+        _setError(result['message']);
+        return false;
+      }
+    } catch (e) {
+      _setError('خطأ في قبول الطلب: ${e.toString()}');
+      return false;
+    } finally {
+      _setLoading(false);
+    }
+  }
+
+  Future<bool> updateOrderStatus(String orderId, OrderStatus newStatus) async {
+    _setLoading(true);
+
+    try {
+      final result = await service.OrderService.updateOrderStatus(
+        orderId: orderId,
+        status: newStatus,
+      );
+
+      if (result['success']) {
+        // Find and update the order in the accepted orders list
+        final updatedAcceptedOrders = state.acceptedOrders.map((order) {
+          if (order.id == orderId) {
+            return order.copyWith(status: newStatus);
+          }
+          return order;
+        }).toList();
+
+        // If the order is now delivered or cancelled, move it to completed orders
+        if (newStatus == OrderStatus.delivered ||
+            newStatus == OrderStatus.cancelled) {
+          final orderToMove = updatedAcceptedOrders.firstWhere(
+            (order) => order.id == orderId,
+          );
+
+          final newAcceptedOrders = updatedAcceptedOrders
+              .where((order) => order.id != orderId)
+              .toList();
+
+          final newCompletedOrders = [...state.completedOrders, orderToMove];
+
+          state = state.copyWith(
+            acceptedOrders: newAcceptedOrders,
+            completedOrders: newCompletedOrders,
+            errorMessage: null,
+          );
+        } else {
+          state = state.copyWith(
+            acceptedOrders: updatedAcceptedOrders,
+            errorMessage: null,
+          );
+        }
+
+        return true;
+      } else {
+        _setError(result['message']);
+        return false;
+      }
+    } catch (e) {
+      _setError('خطأ في تحديث حالة الطلب: ${e.toString()}');
+      return false;
+    } finally {
+      _setLoading(false);
+    }
+  }
+
+  void _setLoading(bool loading) {
+    state = state.copyWith(isLoading: loading);
+  }
+
+  void _setError(String? error) {
+    state = state.copyWith(errorMessage: error);
+  }
+}

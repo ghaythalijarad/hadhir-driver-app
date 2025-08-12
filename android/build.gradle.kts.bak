@@ -1,0 +1,44 @@
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+buildscript {
+    extra.apply {
+        set("kotlin_version", "1.9.22")
+    }
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath("com.android.tools.build:gradle:8.5.1")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:${project.extra["kotlin_version"]}")
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    
+    // This ensures all plugins get the right compile SDK version
+    afterEvaluate {
+        plugins.withId("com.android.library") {
+            extensions.findByName("android")?.let { ext ->
+                if (ext is com.android.build.gradle.LibraryExtension) {
+                    if (ext.compileSdk == null) {
+                        ext.compileSdk = 34
+                    }
+                    
+                    ext.defaultConfig {
+                        minSdk = 23
+                        targetSdk = 34
+                    }
+                }
+            }
+        }
+    }
+}
+
+tasks.register("clean", Delete::class) {
+    delete(rootProject.buildDir)
+}
