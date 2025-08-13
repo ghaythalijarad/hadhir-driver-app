@@ -7,6 +7,8 @@ import 'package:go_router/go_router.dart';
 
 import '../../../app_colors.dart';
 import '../../../providers/riverpod/services_provider.dart';
+import '../services/verification_throttle_service.dart';
+import '../utils/identity_normalizer.dart';
 
 class NewPhoneVerificationScreen extends ConsumerStatefulWidget {
   final String phoneNumber;
@@ -28,14 +30,16 @@ class _NewPhoneVerificationScreenState
   final List<FocusNode> _focusNodes = List.generate(6, (_) => FocusNode());
   bool _isLoading = false;
   bool _isResending = false;
-  int _resendCooldown = 0;
-  Timer? _timer;
-  String? _errorMessage;
+  late final String _normalizedPhone;
 
   @override
   void initState() {
     super.initState();
-    _startResendCooldown();
+    _normalizedPhone = IdentityNormalizer.normalizeIraqiPhone(widget.phoneNumber);
+    // Start initial cooldown when arriving (simulate first send already done)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(verificationThrottleProvider.notifier).recordSend(_normalizedPhone);
+    });
   }
 
   @override
@@ -46,24 +50,7 @@ class _NewPhoneVerificationScreenState
     for (var focusNode in _focusNodes) {
       focusNode.dispose();
     }
-    _timer?.cancel();
     super.dispose();
-  }
-
-  void _startResendCooldown() {
-    setState(() {
-      _resendCooldown = 60;
-    });
-
-    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      setState(() {
-        _resendCooldown--;
-      });
-
-      if (_resendCooldown <= 0) {
-        timer.cancel();
-      }
-    });
   }
 
   String get _verificationCode {
@@ -142,44 +129,38 @@ class _NewPhoneVerificationScreenState
     _focusNodes[0].requestFocus();
   }
 
+  int get _resendCooldown {
+    final throttle = ref.watch(verificationThrottleProvider);
+    return throttle.identityState(_normalizedPhone).cooldownRemaining;
+  }
+
   Future<void> _resendCode() async {
     if (_resendCooldown > 0 || _isResending) return;
 
-    setState(() {
-      _isResending = true;
-      _errorMessage = null;
-    });
+    setState(() { _isResending = true; _errorMessage = null; });
 
     final authService = ref.read(newAuthServiceProvider);
+    final notifier = ref.read(verificationThrottleProvider.notifier);
+    notifier.setSending(_normalizedPhone, true);
 
     try {
-      final result = await authService.sendPhoneVerification(
-        phone: widget.phoneNumber,
-      );
-
+      final result = await authService.sendPhoneVerification(phone: widget.phoneNumber);
       if (result['success'] == true) {
-        _startResendCooldown();
+        notifier.recordSend(_normalizedPhone);
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('تم إرسال رمز التحقق الجديد'),
-              backgroundColor: Colors.green,
-            ),
-          );
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم إرسال رمز التحقق الجديد'), backgroundColor: Colors.green));
         }
       } else {
-        setState(() {
-          _errorMessage = result['message'] ?? 'فشل في إرسال الرمز. يرجى المحاولة مرة أخرى';
-        });
+        final msg = result['message'] ?? 'فشل في إرسال الرمز. يرجى المحاولة مرة أخرى';
+        notifier.setError(_normalizedPhone, msg);
+        setState(() { _errorMessage = msg; });
       }
     } catch (e) {
-      setState(() {
-        _errorMessage = 'حدث خطأ أثناء إرسال الرمز';
-      });
+      notifier.setError(_normalizedPhone, 'حدث خطأ أثناء إرسال الرمز');
+      setState(() { _errorMessage = 'حدث خطأ أثناء إرسال الرمز'; });
     } finally {
-      setState(() {
-        _isResending = false;
-      });
+      notifier.setSending(_normalizedPhone, false);
+      if (mounted) setState(() { _isResending = false; });
     }
   }
 
