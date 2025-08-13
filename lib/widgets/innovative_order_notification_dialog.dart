@@ -157,7 +157,7 @@ class _InnovativeOrderNotificationDialogState
   Widget build(BuildContext context) {
     final batch = widget.batchedOrder;
     final isSingleOrder = batch.orders.length == 1;
-    final textScale = MediaQuery.of(context).textScaleFactor;
+    final textScale = MediaQuery.of(context).textScaler.scale(1.0); // updated for newer Flutter
 
     return Material(
       color: Colors.transparent,
@@ -550,8 +550,9 @@ class _InnovativeOrderNotificationDialogState
     BatchedOrderNotification batch,
     bool isSingleOrder,
   ) {
-    final height = (160 * MediaQuery.of(context).textScaleFactor) \
-        .clamp(160, 210).toDouble();
+    final mediaQuery = MediaQuery.of(context);
+    final scale = mediaQuery.textScaler.scale(1.0);
+    final height = (160 * scale).clamp(160, 210).toDouble();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -880,8 +881,8 @@ class _InnovativeOrderNotificationDialogState
                         ],
                       ),
                     ),
-                  ),
-                );
+                  );
+                };
               },
             ),
           ),
