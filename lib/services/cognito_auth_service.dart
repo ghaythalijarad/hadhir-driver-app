@@ -1,13 +1,110 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:amplify_flutter/amplify_flutter.dart';
 import 'package:amplify_auth_cognito/amplify_auth_cognito.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/foundation.dart';
+import '../services/logging/auth_logger.dart';
+import '../config/environment.dart';
+import 'aws_dynamodb_service.dart';
 
 /// AWS Cognito authentication service for user registration and login
 class CognitoAuthService {
   static String? _authToken;
   static String? get authToken => _authToken;
+  AuthLogger? logger;
+
+  /// Persist any cached extended registration fields to DynamoDB profile.
+  /// Returns true if a pending cache existed and was successfully persisted.
+  Future<bool> persistPendingRegistrationIfAny() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('pending_driver_registration');
+      if (raw == null || raw.isEmpty) {
+        return false;
+      }
+      final Map<String, dynamic> pending = jsonDecode(raw);
+
+      // Ensure the DynamoDB HTTP client is configured with a valid token.
+      String? token = _authToken;
+      if (token == null || token.isEmpty) {
+        try {
+          final session =
+              await Amplify.Auth.fetchAuthSession() as CognitoAuthSession;
+          if (session.isSignedIn) {
+            token = session.userPoolTokensResult.value.accessToken.raw;
+          }
+        } catch (_) {}
+      }
+      if (token != null && token.isNotEmpty) {
+        AWSDynamoDBService.configure(
+          baseUrl: Environment.apiBaseUrl,
+          authToken: token,
+        );
+      }
+
+      // Fetch existing profile first to respect current verification status
+      String existingStatus = 'PENDING_PROFILE';
+      try {
+        final existing = await AWSDynamoDBService().getDriverProfile(
+          'self',
+          maxRetries: 1,
+        );
+        if (existing != null &&
+            (existing['status'] ?? '').toString().isNotEmpty) {
+          existingStatus = existing['status'];
+        }
+      } catch (e) {
+        debugPrint(
+          'persistPendingRegistrationIfAny: failed to read existing profile (will proceed): $e',
+        );
+      }
+
+      // Determine if we should auto-advance status to PENDING_REVIEW (all key docs present)
+      final hasDocsInfo =
+          (pending['licenseNumber'] ?? '').toString().isNotEmpty &&
+          (pending['nationalId'] ?? '').toString().isNotEmpty &&
+          (pending['docs'] ?? '').toString().isNotEmpty;
+
+      final attr = <String, String>{
+        'name': pending['name'] ?? '',
+        'city': pending['city'] ?? '',
+        'vehicleType': pending['vehicleType'] ?? '',
+        'licenseNumber': pending['licenseNumber'] ?? '',
+        'nationalId': pending['nationalId'] ?? '',
+        'docs': pending['docs'] ?? '',
+      };
+
+      // Only attempt auto-transition if profile still at baseline
+      if (hasDocsInfo && existingStatus == 'PENDING_PROFILE') {
+        attr['status'] = 'PENDING_REVIEW';
+        debugPrint(
+          'persistPendingRegistrationIfAny: auto-transitioning status PENDING_PROFILE -> PENDING_REVIEW',
+        );
+      } else {
+        debugPrint(
+          'persistPendingRegistrationIfAny: not setting status (existingStatus=$existingStatus, hasDocsInfo=$hasDocsInfo)',
+        );
+      }
+
+      // Persist to DynamoDB via HTTP API
+      final ok = await AWSDynamoDBService().saveDriverRegistration(
+        driverId: 'self',
+        email: pending['email'] ?? '',
+        phoneNumber: pending['phone'] ?? '',
+        attributes: attr,
+      );
+
+      if (ok) {
+        await prefs.remove('pending_driver_registration');
+        return true;
+      }
+      return false;
+    } catch (e) {
+      debugPrint('persistPendingRegistrationIfAny error: $e');
+      return false;
+    }
+  }
 
   Future<void> initialize() async {
     final prefs = await SharedPreferences.getInstance();
@@ -38,7 +135,16 @@ class CognitoAuthService {
     required String vehicleType,
     required String licenseNumber,
     required String nationalId,
+    Map<String, dynamic>? drivingLicenseFile,
+    Map<String, dynamic>? vehicleRegistrationFile,
+    Map<String, dynamic>? nonCriminalRecordFile,
   }) async {
+    logger?.logSendCode(
+      identity: email,
+      channel: 'email',
+      purpose: 'signup',
+      attempt: 1,
+    );
     debugPrint('🔧 CognitoAuthService.registerWithEmail called');
     debugPrint('   Email: $email');
     debugPrint('   Phone: $phone');
@@ -48,19 +154,15 @@ class CognitoAuthService {
       debugPrint('🔧 Building user attributes...');
       final userAttributes = <AuthUserAttributeKey, String>{
         AuthUserAttributeKey.email: email,
-        AuthUserAttributeKey.phoneNumber: _formatPhoneNumber(phone),
+        if (phone.isNotEmpty)
+          AuthUserAttributeKey.phoneNumber: _formatPhoneNumber(phone),
         AuthUserAttributeKey.name: fullName,
-        // Custom attributes for driver profile
-        const CognitoUserAttributeKey.custom('city'): city,
-        const CognitoUserAttributeKey.custom('vehicle_type'): vehicleType,
-        const CognitoUserAttributeKey.custom('license_number'): licenseNumber,
-        const CognitoUserAttributeKey.custom('national_id'): nationalId,
+        // NOTE: Custom driver profile fields removed from Cognito. They will be stored in DynamoDB.
       };
 
-      debugPrint('🔧 User attributes prepared: ${userAttributes.length} attributes');
-      debugPrint('🔧 Formatted phone: ${_formatPhoneNumber(phone)}');
-
-      debugPrint('🔧 User attributes prepared: ${userAttributes.length} attributes');
+      debugPrint(
+        '🔧 User attributes prepared (Cognito only): ${userAttributes.length} attributes',
+      );
       debugPrint('🔧 Formatted phone: ${_formatPhoneNumber(phone)}');
 
       debugPrint('🔧 Calling Amplify.Auth.signUp...');
@@ -69,6 +171,26 @@ class CognitoAuthService {
         password: password,
         options: SignUpOptions(userAttributes: userAttributes),
       );
+
+      // Cache extended fields to persist post-confirmation
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(
+          'pending_driver_registration',
+          jsonEncode({
+            'email': email,
+            'phone': _formatPhoneNumber(phone),
+            'name': fullName,
+            'city': city,
+            'vehicleType': vehicleType,
+            'licenseNumber': licenseNumber,
+            'nationalId': nationalId,
+            'docs': '',
+          }),
+        );
+      } catch (_) {}
+
+      // TODO(DynamoDB): After successful sign up, persist driver profile (city, vehicleType, licenseNumber, nationalId, files) in DynamoDB table.
 
       debugPrint('🔧 Amplify.Auth.signUp completed');
       debugPrint('🔧 isSignUpComplete: ${result.isSignUpComplete}');
@@ -123,25 +245,89 @@ class CognitoAuthService {
     required String vehicleType,
     required String licenseNumber,
     required String nationalId,
+    Map<String, dynamic>? drivingLicenseFile,
+    Map<String, dynamic>? vehicleRegistrationFile,
+    Map<String, dynamic>? nonCriminalRecordFile,
   }) async {
+    debugPrint('🔧 CognitoAuthService.registerWithPhone called');
+    debugPrint('🔧 Input phone: $phone');
+    debugPrint('🔧 Input validation:');
+    debugPrint('  - phone length: ${phone.length}');
+    debugPrint('  - password length: ${password.length}');
+    debugPrint('  - fullName: "$fullName"');
+    debugPrint('  - city: "$city"');
+    debugPrint('  - vehicleType: "$vehicleType"');
+    debugPrint('  - licenseNumber: "$licenseNumber"');
+    debugPrint('  - nationalId: "$nationalId"');
+    debugPrint('🔧 Debug: Hot reload trigger');
+
+    // Additional validation before AWS call
+    if (!isValidIraqiPhone(phone)) {
+      debugPrint('❌ Phone validation failed for: $phone');
+      return {
+        'success': false,
+        'message': 'رقم الهاتف غير صحيح. يجب أن يبدأ بـ 07 ويكون 11 رقماً',
+        'error': 'INVALID_PHONE_FORMAT',
+      };
+    }
+
+    if (password.length < 8) {
+      debugPrint('❌ Password too short: ${password.length}');
+      return {
+        'success': false,
+        'message': 'كلمة المرور يجب أن تكون 8 أحرف على الأقل',
+        'error': 'WEAK_PASSWORD',
+      };
+    }
+
+    logger?.logSendCode(
+      identity: phone,
+      channel: 'phone',
+      purpose: 'signup',
+      attempt: 1,
+    );
     try {
       final formattedPhone = _formatPhoneNumber(phone);
+      debugPrint('🔧 Formatted phone: $formattedPhone');
 
       final userAttributes = <AuthUserAttributeKey, String>{
         AuthUserAttributeKey.phoneNumber: formattedPhone,
         AuthUserAttributeKey.name: fullName,
-        // Custom attributes for driver profile
-        const CognitoUserAttributeKey.custom('city'): city,
-        const CognitoUserAttributeKey.custom('vehicle_type'): vehicleType,
-        const CognitoUserAttributeKey.custom('license_number'): licenseNumber,
-        const CognitoUserAttributeKey.custom('national_id'): nationalId,
+        // NOTE: Custom driver profile fields removed from Cognito. They will be stored in DynamoDB.
       };
+
+      debugPrint(
+        '🔧 User attributes prepared (Cognito only): ${userAttributes.length} attributes',
+      );
+      debugPrint(
+        '🔧 Calling Amplify.Auth.signUp with username: $formattedPhone',
+      );
 
       final result = await Amplify.Auth.signUp(
         username: formattedPhone,
         password: password,
         options: SignUpOptions(userAttributes: userAttributes),
       );
+
+      // Cache extended fields to persist post-confirmation
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(
+          'pending_driver_registration',
+          jsonEncode({
+            'email': '',
+            'phone': formattedPhone,
+            'name': fullName,
+            'city': city,
+            'vehicleType': vehicleType,
+            'licenseNumber': licenseNumber,
+            'nationalId': nationalId,
+            'docs': '',
+          }),
+        );
+      } catch (_) {}
+
+      // TODO(DynamoDB): After successful sign up, persist driver profile (city, vehicleType, licenseNumber, nationalId, files) in DynamoDB table.
 
       if (result.isSignUpComplete) {
         return {
@@ -160,13 +346,38 @@ class CognitoAuthService {
         };
       }
     } on AuthException catch (e) {
+      debugPrint('🔧 AuthException in registerWithPhone: ${e.message}');
+      debugPrint('🔧 AuthException type: ${e.runtimeType}');
+      debugPrint('🔧 Underlying exception: ${e.underlyingException}');
+
+      // Detailed error analysis
+      String detailedMessage = _getArabicErrorMessage(e);
+      String errorCode = 'AUTH_ERROR';
+
+      if (e is InvalidParameterException) {
+        debugPrint('🔧 InvalidParameterException details:');
+        debugPrint('   - Original phone: $phone');
+        debugPrint('   - Formatted phone: ${_formatPhoneNumber(phone)}');
+        debugPrint('   - Phone validation result: ${isValidIraqiPhone(phone)}');
+        debugPrint('   - Password length: ${password.length}');
+        errorCode = 'INVALID_PARAMETER';
+      }
+      
       return {
         'success': false,
-        'message': _getArabicErrorMessage(e),
+        'message': detailedMessage,
         'error': e.message,
-        'error_code': e.underlyingException?.toString(),
+        'error_code': errorCode,
+        'debug_info': {
+          'input_phone': phone,
+          'formatted_phone': _formatPhoneNumber(phone),
+          'phone_validation': isValidIraqiPhone(phone),
+          'exception_type': e.runtimeType.toString(),
+        },
       };
     } catch (e) {
+      debugPrint('🔧 Generic exception in registerWithPhone: $e');
+      debugPrint('🔧 Exception type: ${e.runtimeType}');
       return {
         'success': false,
         'message': 'حدث خطأ غير متوقع',
@@ -180,191 +391,26 @@ class CognitoAuthService {
     required String email,
     required String verificationCode,
   }) async {
-    try {
-      final result = await Amplify.Auth.confirmSignUp(
-        username: email,
-        confirmationCode: verificationCode,
-      );
-      return result.isSignUpComplete;
-    } on AuthException catch (e) {
-      safePrint('Error confirming email: ${e.message}');
-      return false;
-    }
-  }
-
-  /// Verify phone number
-  Future<Map<String, dynamic>> verifyPhoneNumber({
-    required String phone,
-    required String verificationCode,
-  }) async {
-    try {
-      final formattedPhone = _formatPhoneNumber(phone);
-      final result = await Amplify.Auth.confirmSignUp(
-        username: formattedPhone,
-        confirmationCode: verificationCode,
-      );
-
-      return {
-        'success': result.isSignUpComplete,
-        'verified': result.isSignUpComplete,
-        'message': result.isSignUpComplete
-            ? 'تم التحقق من رقم الهاتف بنجاح'
-            : 'رمز التحقق غير صحيح',
-      };
-    } on AuthException catch (e) {
-      return {
-        'success': false,
-        'verified': false,
-        'message': _getArabicErrorMessage(e),
-      };
-    }
-  }
-
-  /// Login with email
-  Future<bool> loginWithEmail({
-    required String email,
-    required String password,
-  }) async {
-    try {
-      final result = await Amplify.Auth.signIn(
-        username: email,
-        password: password,
-      );
-
-      if (result.isSignedIn) {
-        // Get user session token
-        final session =
-            await Amplify.Auth.fetchAuthSession() as CognitoAuthSession;
-        if (session.isSignedIn) {
-          final tokens = session.userPoolTokensResult.value;
-          await _saveToken(tokens.accessToken.raw);
-          return true;
-        }
+    final success = await (() async {
+      try {
+        final result = await Amplify.Auth.confirmSignUp(
+          username: email,
+          confirmationCode: verificationCode,
+        );
+        return result.isSignUpComplete;
+      } on AuthException catch (e) {
+        safePrint('Error confirming email: ${e.message}');
+        return false;
       }
-      return false;
-    } on AuthException catch (e) {
-      safePrint('Login error: ${e.message}');
-      return false;
-    }
-  }
-
-  /// Login with phone
-  Future<bool> loginWithPhone({
-    required String phone,
-    required String password,
-  }) async {
-    try {
-      final formattedPhone = _formatPhoneNumber(phone);
-      final result = await Amplify.Auth.signIn(
-        username: formattedPhone,
-        password: password,
-      );
-
-      if (result.isSignedIn) {
-        // Get user session token
-        final session =
-            await Amplify.Auth.fetchAuthSession() as CognitoAuthSession;
-        if (session.isSignedIn) {
-          final tokens = session.userPoolTokensResult.value;
-          await _saveToken(tokens.accessToken.raw);
-          return true;
-        }
-      }
-      return false;
-    } on AuthException catch (e) {
-      safePrint('Login error: ${e.message}');
-      return false;
-    }
-  }
-
-  /// Login with email (detailed result)
-  Future<Map<String, dynamic>> loginWithEmailDetailed({
-    required String email,
-    required String password,
-  }) async {
-    try {
-      final result = await Amplify.Auth.signIn(
-        username: email,
-        password: password,
-      );
-
-      if (result.isSignedIn) {
-        // Get user session token
-        final session =
-            await Amplify.Auth.fetchAuthSession() as CognitoAuthSession;
-        if (session.isSignedIn) {
-          final tokens = session.userPoolTokensResult.value;
-          await _saveToken(tokens.accessToken.raw);
-        }
-        return {
-          'success': true,
-          'message': 'تم تسجيل الدخول بنجاح',
-        };
-      }
-
-      return {
-        'success': false,
-        'message': 'مطلوب خطوة إضافية لإكمال تسجيل الدخول',
-      };
-    } on AuthException catch (e) {
-      return {
-        'success': false,
-        'message': _getArabicErrorMessage(e),
-        'error': e.message,
-        'error_code': e.underlyingException?.toString(),
-      };
-    } catch (e) {
-      return {
-        'success': false,
-        'message': 'حدث خطأ غير متوقع',
-        'error': e.toString(),
-      };
-    }
-  }
-
-  /// Login with phone (detailed result)
-  Future<Map<String, dynamic>> loginWithPhoneDetailed({
-    required String phone,
-    required String password,
-  }) async {
-    try {
-      final formattedPhone = _formatPhoneNumber(phone);
-      final result = await Amplify.Auth.signIn(
-        username: formattedPhone,
-        password: password,
-      );
-
-      if (result.isSignedIn) {
-        final session =
-            await Amplify.Auth.fetchAuthSession() as CognitoAuthSession;
-        if (session.isSignedIn) {
-          final tokens = session.userPoolTokensResult.value;
-          await _saveToken(tokens.accessToken.raw);
-        }
-        return {
-          'success': true,
-          'message': 'تم تسجيل الدخول بنجاح',
-        };
-      }
-
-      return {
-        'success': false,
-        'message': 'مطلوب خطوة إضافية لإكمال تسجيل الدخول',
-      };
-    } on AuthException catch (e) {
-      return {
-        'success': false,
-        'message': _getArabicErrorMessage(e),
-        'error': e.message,
-        'error_code': e.underlyingException?.toString(),
-      };
-    } catch (e) {
-      return {
-        'success': false,
-        'message': 'حدث خطأ غير متوقع',
-        'error': e.toString(),
-      };
-    }
+    })();
+    logger?.logVerifyCode(
+      identity: email,
+      channel: 'email',
+      purpose: 'signup',
+      success: success,
+      failureReason: success ? null : 'code_mismatch',
+    );
+    return success;
   }
 
   /// Get current authenticated user profile
@@ -378,32 +424,284 @@ class CognitoAuthService {
       final user = await Amplify.Auth.getCurrentUser();
       final userAttributes = await Amplify.Auth.fetchUserAttributes();
 
-      // Extract user attributes
       final attributeMap = <String, String>{};
       for (final attr in userAttributes) {
         attributeMap[attr.userAttributeKey.key] = attr.value;
       }
 
-      return {
-        'success': true,
-        'data': {
-          'id': user.userId,
-          'username': user.username,
-          'name': attributeMap['name'] ?? '',
-          'email': attributeMap['email'] ?? '',
-          'phone': attributeMap['phone_number'] ?? '',
-          'city': attributeMap['custom:city'] ?? '',
-          'vehicle_type': attributeMap['custom:vehicle_type'] ?? '',
-          'license_number': attributeMap['custom:license_number'] ?? '',
-          'national_id': attributeMap['custom:national_id'] ?? '',
-          'email_verified': attributeMap['email_verified'] == 'true',
-          'phone_verified': attributeMap['phone_number_verified'] == 'true',
-          'status': 'active',
-        },
+      // Configure DynamoDB API client with Cognito token
+      final cognitoSession = session as CognitoAuthSession;
+      final tokens = cognitoSession.userPoolTokensResult.value;
+      final accessToken = tokens.accessToken.raw;
+      AWSDynamoDBService.configure(
+        baseUrl: Environment.apiBaseUrl,
+        authToken: accessToken,
+      );
+
+      // Retry fetching profile (handle eventual consistency right after confirmation)
+      Map<String, dynamic>? dynamoProfile;
+      for (var attempt = 1; attempt <= 3; attempt++) {
+        dynamoProfile = await AWSDynamoDBService().getDriverProfile(
+          'self',
+          maxRetries: 1,
+        );
+        if (dynamoProfile != null) break;
+        await Future.delayed(const Duration(milliseconds: 200));
+      }
+
+      final merged = {
+        'id': user.userId,
+        'username': user.username,
+        'name': attributeMap['name'] ?? (dynamoProfile?['name'] ?? ''),
+        'email': attributeMap['email'] ?? (dynamoProfile?['email'] ?? ''),
+        'phone':
+            attributeMap['phone_number'] ?? (dynamoProfile?['phone'] ?? ''),
+        'city': dynamoProfile?['city'] ?? '',
+        'vehicle_type': dynamoProfile?['vehicleType'] ?? '',
+        'license_number': dynamoProfile?['licenseNumber'] ?? '',
+        'national_id': dynamoProfile?['nationalId'] ?? '',
+        'email_verified': attributeMap['email_verified'] == 'true',
+        'phone_verified': attributeMap['phone_number_verified'] == 'true',
+        'status': dynamoProfile?['status'] ?? 'PENDING_PROFILE',
       };
+
+      return {'success': true, 'data': merged};
     } on AuthException catch (e) {
       return {'success': false, 'message': _getArabicErrorMessage(e)};
     }
+  }
+
+  /// Verify phone number
+  Future<Map<String, dynamic>> verifyPhoneNumber({
+    required String phone,
+    required String verificationCode,
+  }) async {
+    final result = await (() async {
+      try {
+        final formattedPhone = _formatPhoneNumber(phone);
+        final result = await Amplify.Auth.confirmSignUp(
+          username: formattedPhone,
+          confirmationCode: verificationCode,
+        );
+
+        // After confirmation, try to read profile and save extended fields if available
+        if (result.isSignUpComplete) {
+          try {
+            // Warm-up read and persist pending registration
+            await persistPendingRegistrationIfAny();
+            await Future.delayed(const Duration(milliseconds: 300));
+            await AWSDynamoDBService().getDriverProfile('self');
+          } catch (_) {}
+        }
+
+        return {
+          'success': result.isSignUpComplete,
+          'verified': result.isSignUpComplete,
+          'message': result.isSignUpComplete
+              ? 'تم التحقق من رقم الهاتف بنجاح'
+              : 'رمز التحقق غير صحيح',
+        };
+      } on AuthException catch (e) {
+        return {
+          'success': false,
+          'verified': false,
+          'message': _getArabicErrorMessage(e),
+        };
+      }
+    })();
+    logger?.logVerifyCode(
+      identity: phone,
+      channel: 'phone',
+      purpose: 'signup',
+      success: result['success'] == true,
+      failureReason: result['success'] == true ? null : 'code_mismatch',
+    );
+    return result;
+  }
+
+  /// Login with email
+  Future<bool> loginWithEmail({
+    required String email,
+    required String password,
+  }) async {
+    logger?.logLoginAttempt(identity: email, channel: 'email');
+    final success = await (() async {
+      try {
+        final result = await Amplify.Auth.signIn(
+          username: email,
+          password: password,
+        );
+
+        if (result.isSignedIn) {
+          // Get user session token
+          final session =
+              await Amplify.Auth.fetchAuthSession() as CognitoAuthSession;
+          if (session.isSignedIn) {
+            final tokens = session.userPoolTokensResult.value;
+            await _saveToken(tokens.accessToken.raw);
+            // Persist pending registration if exists
+            await persistPendingRegistrationIfAny();
+            return true;
+          }
+        }
+        return false;
+      } on AuthException catch (e) {
+        safePrint('Login error: ${e.message}');
+        return false;
+      }
+    })();
+    logger?.logLoginResult(
+      identity: email,
+      channel: 'email',
+      success: success,
+      failureReason: success ? null : 'invalid_credentials',
+    );
+    return success;
+  }
+
+  /// Login with phone
+  Future<bool> loginWithPhone({
+    required String phone,
+    required String password,
+  }) async {
+    logger?.logLoginAttempt(identity: phone, channel: 'phone');
+    final success = await (() async {
+      try {
+        final formattedPhone = _formatPhoneNumber(phone);
+        final result = await Amplify.Auth.signIn(
+          username: formattedPhone,
+          password: password,
+        );
+
+        if (result.isSignedIn) {
+          // Get user session token
+          final session =
+              await Amplify.Auth.fetchAuthSession() as CognitoAuthSession;
+          if (session.isSignedIn) {
+            final tokens = session.userPoolTokensResult.value;
+            await _saveToken(tokens.accessToken.raw);
+            // Persist pending registration if exists
+            await persistPendingRegistrationIfAny();
+            return true;
+          }
+        }
+        return false;
+      } on AuthException catch (e) {
+        safePrint('Login error: ${e.message}');
+        return false;
+      }
+    })();
+    logger?.logLoginResult(
+      identity: phone,
+      channel: 'phone',
+      success: success,
+      failureReason: success ? null : 'invalid_credentials',
+    );
+    return success;
+  }
+
+  /// Login with email (detailed result)
+  Future<Map<String, dynamic>> loginWithEmailDetailed({
+    required String email,
+    required String password,
+  }) async {
+    logger?.logLoginAttempt(identity: email, channel: 'email');
+    final result = await (() async {
+      try {
+        final result = await Amplify.Auth.signIn(
+          username: email,
+          password: password,
+        );
+
+        if (result.isSignedIn) {
+          // Get user session token
+          final session =
+              await Amplify.Auth.fetchAuthSession() as CognitoAuthSession;
+          if (session.isSignedIn) {
+            final tokens = session.userPoolTokensResult.value;
+            await _saveToken(tokens.accessToken.raw);
+          }
+          return {'success': true, 'message': 'تم تسجيل الدخول بنجاح'};
+        }
+
+        return {
+          'success': false,
+          'message': 'مطلوب خطوة إضافية لإكمال تسجيل الدخول',
+        };
+      } on AuthException catch (e) {
+        return {
+          'success': false,
+          'message': _getArabicErrorMessage(e),
+          'error': e.message,
+          'error_code': e.underlyingException?.toString(),
+        };
+      } catch (e) {
+        return {
+          'success': false,
+          'message': 'حدث خطأ غير متوقع',
+          'error': e.toString(),
+        };
+      }
+    })();
+    logger?.logLoginResult(
+      identity: email,
+      channel: 'email',
+      success: result['success'] == true,
+      failureReason: result['success'] == true ? null : 'invalid_credentials',
+    );
+    return result;
+  }
+
+  /// Login with phone (detailed result)
+  Future<Map<String, dynamic>> loginWithPhoneDetailed({
+    required String phone,
+    required String password,
+  }) async {
+    logger?.logLoginAttempt(identity: phone, channel: 'phone');
+    final result = await (() async {
+      try {
+        final formattedPhone = _formatPhoneNumber(phone);
+        final result = await Amplify.Auth.signIn(
+          username: formattedPhone,
+          password: password,
+        );
+
+        if (result.isSignedIn) {
+          final session =
+              await Amplify.Auth.fetchAuthSession() as CognitoAuthSession;
+          if (session.isSignedIn) {
+            final tokens = session.userPoolTokensResult.value;
+            await _saveToken(tokens.accessToken.raw);
+          }
+          return {'success': true, 'message': 'تم تسجيل الدخول بنجاح'};
+        }
+
+        return {
+          'success': false,
+          'message': 'مطلوب خطوة إضافية لإكمال تسجيل الدخول',
+        };
+      } on AuthException catch (e) {
+        return {
+          'success': false,
+          'message': _getArabicErrorMessage(e),
+          'error': e.message,
+          'error_code': e.underlyingException?.toString(),
+        };
+      } catch (e) {
+        return {
+          'success': false,
+          'message': 'حدث خطأ غير متوقع',
+          'error': e.toString(),
+        };
+      }
+    })();
+    logger?.logLoginResult(
+      identity: phone,
+      channel: 'phone',
+      success: result['success'] == true,
+      failureReason: result['success'] == true ? null : 'invalid_credentials',
+    );
+    return result;
   }
 
   /// Reset password with email
@@ -456,12 +754,35 @@ class CognitoAuthService {
 
   /// Logout
   Future<void> logout() async {
+    await _clearToken();
+    logger?.logLogout(identity: 'session');
+  }
+
+  /// Resend confirmation code with details
+  Future<Map<String, dynamic>> resendConfirmationCodeWithDetails({
+    required String username,
+  }) async {
     try {
-      await Amplify.Auth.signOut();
-      await _clearToken();
+      final result = await Amplify.Auth.resendSignUpCode(username: username);
+
+      String? deliveryMessage;
+      if (result.codeDeliveryDetails.destination != null) {
+        final destination = result.codeDeliveryDetails.destination!;
+        if (result.codeDeliveryDetails.deliveryMedium == DeliveryMedium.email) {
+          deliveryMessage = 'تم إرسال الرمز إلى $destination';
+        } else if (result.codeDeliveryDetails.deliveryMedium ==
+            DeliveryMedium.sms) {
+          deliveryMessage = 'تم إرسال الرمز إلى $destination';
+        }
+      }
+
+      return {
+        'success': true,
+        'message': 'تم إعادة إرسال رمز التحقق',
+        'delivery_message': deliveryMessage,
+      };
     } on AuthException catch (e) {
-      safePrint('Logout error: ${e.message}');
-      await _clearToken(); // Clear token anyway
+      return {'success': false, 'message': _getArabicErrorMessage(e)};
     }
   }
 
@@ -477,16 +798,88 @@ class CognitoAuthService {
     }
   }
 
+  /// Force send verification code to email specifically
+  /// Use this when user registered with both email and phone, but we want email verification
+  Future<Map<String, dynamic>> sendEmailVerificationCode({
+    required String email,
+  }) async {
+    try {
+      debugPrint('🔧 Sending email verification code to: $email');
+      
+      final result = await Amplify.Auth.sendUserAttributeVerificationCode(
+        userAttributeKey: AuthUserAttributeKey.email,
+      );
+
+      String? deliveryMessage;
+      if (result.codeDeliveryDetails.destination != null) {
+        final destination = result.codeDeliveryDetails.destination!;
+        deliveryMessage = 'تم إرسال رمز التحقق إلى بريدك الإلكتروني: $destination';
+      }
+
+      return {
+        'success': true,
+        'message': 'تم إرسال رمز التحقق إلى بريدك الإلكتروني',
+        'delivery_message': deliveryMessage,
+        'delivery_medium': 'email',
+      };
+    } on AuthException catch (e) {
+      debugPrint('🔧 Error sending email verification: ${e.message}');
+      return {
+        'success': false, 
+        'message': _getArabicErrorMessage(e),
+        'error': e.message,
+      };
+    }
+  }
+
+  /// Confirm email attribute verification (after user is already signed up)
+  Future<bool> confirmEmailAttribute({
+    required String verificationCode,
+  }) async {
+    try {
+      await Amplify.Auth.confirmUserAttribute(
+        userAttributeKey: AuthUserAttributeKey.email,
+        confirmationCode: verificationCode,
+      );
+      debugPrint('🔧 Email attribute confirmed successfully');
+      return true;
+    } on AuthException catch (e) {
+      debugPrint('🔧 Error confirming email attribute: ${e.message}');
+      return false;
+    }
+  }
+
   // Helper methods
   String _formatPhoneNumber(String phone) {
     // Convert Iraqi phone format to international format
-    if (phone.startsWith('07')) {
-      return '+964${phone.substring(1)}';
-    } else if (phone.startsWith('7')) {
-      return '+964$phone';
-    } else if (!phone.startsWith('+')) {
-      return '+964$phone';
+    // Handle empty or invalid input
+    if (phone.isEmpty) return phone;
+
+    // Clean the input - remove spaces and special characters except +
+    String cleanPhone = phone.replaceAll(RegExp(r'[^\d+]'), '');
+
+    // If it already starts with +964, validate and return
+    if (cleanPhone.startsWith('+964')) {
+      // Remove + for length validation
+      String withoutPlus = cleanPhone.substring(1);
+      // Should be 964 + 7 + 9 digits = 13 total (12 without +)
+      if (withoutPlus.length == 12 &&
+          withoutPlus.substring(3).startsWith('7')) {
+        return cleanPhone; // Already properly formatted
+      }
     }
+
+    // Handle Iraqi local format 07XXXXXXXXX (11 digits)
+    if (cleanPhone.startsWith('07') && cleanPhone.length == 11) {
+      return '+964${cleanPhone.substring(1)}'; // Remove 0, add +964
+    }
+
+    // Handle format 7XXXXXXXXX (10 digits)
+    if (cleanPhone.startsWith('7') && cleanPhone.length == 10) {
+      return '+964$cleanPhone';
+    }
+    
+    // If it doesn't match expected patterns, return as-is (will likely fail validation)
     return phone;
   }
 
@@ -498,11 +891,9 @@ class CognitoAuthService {
     if (e is UserNotFoundException) {
       return 'المستخدم غير موجود';
     }
-    // NotAuthorizedException isn't available as a concrete type in all builds; fall back to message matching below
     if (e is CodeMismatchException) {
       return 'رمز التحقق غير صحيح';
     }
-    // CodeExpiredException and DeviceNotRememberedException may not be available; handle via message matching
     if (e is InvalidPasswordException) {
       return 'كلمة المرور لا تستوفي المتطلبات';
     }
@@ -513,7 +904,20 @@ class CognitoAuthService {
       return 'محاولات عديدة فاشلة. الرجاء الانتظار';
     }
     if (e is InvalidParameterException) {
-      return 'مدخلات غير صحيحة';
+      // More specific error messages for invalid parameters
+      final message = e.message.toLowerCase();
+      if (message.contains('phone') || message.contains('phonenumber')) {
+        return 'رقم الهاتف غير صحيح. يرجى إدخال رقم هاتف عراقي صحيح (مثال: 07701234567)';
+      } else if (message.contains('email')) {
+        return 'البريد الإلكتروني غير صحيح';
+      } else if (message.contains('password')) {
+        return 'كلمة المرور لا تتوافق مع المتطلبات. يجب أن تحتوي على 8 أحرف على الأقل مع أحرف وأرقام';
+      } else if (message.contains('username')) {
+        return 'اسم المستخدم غير صحيح';
+      } else if (message.contains('attribute')) {
+        return 'هناك خطأ في البيانات المدخلة. يرجى التحقق من جميع الحقول';
+      }
+      return 'بيانات غير صحيحة. يرجى مراجعة المدخلات والمحاولة مرة أخرى';
     }
     if (e is NetworkException) {
       return 'خطأ في الاتصال بالإنترنت';

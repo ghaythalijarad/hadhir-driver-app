@@ -1,17 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../providers/riverpod/services_provider.dart';
 
-import '../../providers/auth_provider.dart';
-
-class SplashPage extends StatefulWidget {
+class SplashPage extends ConsumerStatefulWidget {
   const SplashPage({super.key});
-
   @override
-  State<SplashPage> createState() => _SplashPageState();
+  ConsumerState<SplashPage> createState() => _SplashPageState();
 }
 
-class _SplashPageState extends State<SplashPage> {
+class _SplashPageState extends ConsumerState<SplashPage> {
   @override
   void initState() {
     super.initState();
@@ -22,17 +20,17 @@ class _SplashPageState extends State<SplashPage> {
     // Wait for a short period to show splash screen
     await Future.delayed(const Duration(seconds: 2));
 
-    if (mounted) {
-      final authProvider = Provider.of<AuthProvider>(context, listen: false);
-      // It's important to use listen: false in initState.
-      await authProvider.initialize();
-      if (mounted) {
-        if (authProvider.isAuthenticated) {
-          context.go('/');
-        } else {
-          context.go('/login');
-        }
-      }
+    if (!mounted) return;
+    try {
+      // Check authentication status using our auth service
+      final authService = ref.read(authServiceProvider);
+      final isAuthenticated = authService.isAuthenticated;
+      
+      if (!mounted) return;
+      context.go(isAuthenticated ? '/' : '/login');
+    } catch (_) {
+      if (!mounted) return;
+      context.go('/login');
     }
   }
 

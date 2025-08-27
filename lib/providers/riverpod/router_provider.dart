@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:provider/provider.dart' as provider;
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:riverpod/riverpod.dart' show Ref;
 
@@ -13,43 +12,42 @@ import '../../features/authentication/screens/new_forgot_password_screen.dart';
 import '../../features/authentication/screens/registration_debug_screen.dart';
 import '../../features/navigation/navigation_page.dart';
 import '../../features/splash/splash_page.dart';
+import '../../debug/config_debug_screen.dart';
+import '../../debug/email_verification_test_screen.dart';
+import '../../debug/comprehensive_email_test.dart';
+import '../../debug/sso_email_test_screen.dart';
 import '../../main.dart' show DriverHomePage;
 import '../../models/order_model.dart';
-import '../../providers/auth_provider.dart' as legacy_auth;
-import 'auth_provider.dart';
+import 'services_provider.dart';
 
 part 'router_provider.g.dart';
 
 @Riverpod(keepAlive: true)
 GoRouter router(Ref ref) {
-  // Check both authentication systems for compatibility
-  final riverpodAuthState = ref.watch(authProvider);
+  // Use the auth service to check authentication status
+  final authService = ref.watch(authServiceProvider);
 
   return GoRouter(
     initialLocation: '/login',
     redirect: (BuildContext context, GoRouterState state) {
-      // Check legacy auth provider first (for phone/password login compatibility)
-      final legacyAuthProvider = provider.Provider.of<legacy_auth.AuthProvider>(
-        context,
-        listen: false,
-      );
-      final isAuthenticated =
-          legacyAuthProvider.isAuthenticated ||
-          riverpodAuthState.isAuthenticated;
+      final isAuthenticated = authService.isAuthenticated;
 
       final isAuthRoute =
           state.uri.path.startsWith('/login') ||
           state.uri.path.startsWith('/register') ||
           state.uri.path.startsWith('/forgot-password') ||
           state.uri.path.startsWith('/verify-phone') ||
-          state.uri.path.startsWith('/email-verification') ||
-          state.uri.path.startsWith('/phone-verification');
+          state.uri.path.startsWith('/email-verification');
+
+      final isDebugRoute = 
+          state.uri.path.startsWith('/config-debug') ||
+          state.uri.path.startsWith('/email-test') ||
+          state.uri.path.startsWith('/comprehensive-email-test') ||
+          state.uri.path.startsWith('/sso-email-test') ||
+          state.uri.path.startsWith('/registration-debug');
 
       debugPrint(
-        '🔀 Router redirect: path=${state.uri.path}, isAuthenticated=$isAuthenticated, isAuthRoute=$isAuthRoute',
-      );
-      debugPrint(
-        '🔀 Legacy auth: ${legacyAuthProvider.isAuthenticated}, Riverpod auth: ${riverpodAuthState.isAuthenticated}',
+        '🔀 Router redirect: path=${state.uri.path}, isAuthenticated=$isAuthenticated, isAuthRoute=$isAuthRoute, isDebugRoute=$isDebugRoute',
       );
 
       // If user is authenticated and trying to access auth routes, redirect to home
@@ -58,9 +56,9 @@ GoRouter router(Ref ref) {
         return '/';
       }
 
-      // If user is not authenticated and not on auth route, redirect to login
-      if (!isAuthenticated && !isAuthRoute) {
-        debugPrint('🔀 Redirecting to login (not authenticated)');
+      // If user is not authenticated and not on auth/debug route, redirect to login
+      if (!isAuthenticated && !isAuthRoute && !isDebugRoute) {
+        debugPrint('🔀 Redirecting to login (not authenticated, not debug)');
         return '/login';
       }
 
@@ -87,10 +85,26 @@ GoRouter router(Ref ref) {
         builder: (context, state) => const RegistrationDebugScreen(),
       ),
       GoRoute(
+        path: '/config-debug',
+        builder: (context, state) => const ConfigDebugScreen(),
+      ),
+      GoRoute(
+        path: '/email-test',
+        builder: (context, state) => const EmailVerificationTestScreen(),
+      ),
+      GoRoute(
+        path: '/comprehensive-email-test',
+        builder: (context, state) => const ComprehensiveEmailTestScreen(),
+      ),
+      GoRoute(
+        path: '/sso-email-test',
+        builder: (context, state) => const SSOEmailTestScreen(),
+      ),
+      GoRoute(
         path: '/verify-phone',
         builder: (context, state) {
           final extra = state.extra as Map<String, dynamic>?;
-          final phone = extra?['phone'] ?? '';
+          final phone = extra?['phone'] as String? ?? '';
           return NewPhoneVerificationScreen(phoneNumber: phone);
         },
       ),
@@ -99,8 +113,16 @@ GoRouter router(Ref ref) {
         path: '/email-verification',
         builder: (context, state) {
           final extra = state.extra as Map<String, dynamic>?;
-          final email = extra?['email'] ?? '';
-          return NewEmailVerificationScreen(email: email);
+          final email = extra?['email'] as String? ?? '';
+          final delivery = extra?['delivery'] as String?;
+          final username =
+              extra?['username'] as String? ??
+              email; // Fallback to email for safety
+          return NewEmailVerificationScreen(
+            username: username,
+            email: email,
+            delivery: delivery,
+          );
         },
       ),
       GoRoute(

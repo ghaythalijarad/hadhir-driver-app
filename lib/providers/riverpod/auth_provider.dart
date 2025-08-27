@@ -1,7 +1,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
+import '../../config/app_config.dart';
 import '../../services/auth_service.dart';
+import '../../services/cognito_auth_service.dart';
 import '../../services/realtime_communication_service.dart';
 
 part 'auth_provider.g.dart';
@@ -47,15 +49,29 @@ class Auth extends _$Auth {
     _setLoading(true);
 
     try {
-      await AuthService.initialize();
-      debugPrint('🔐 AuthService initialized successfully');
+      if (AppConfig.enableAWSIntegration) {
+        final cognito = CognitoAuthService();
+        await cognito.initialize();
+        debugPrint('🔐 CognitoAuthService initialized successfully');
 
-      if (AuthService.isAuthenticated) {
-        debugPrint('🔐 User is authenticated, loading driver data');
-        await _loadCurrentDriver();
+        if (cognito.isAuthenticated) {
+          debugPrint('🔐 AWS: User is authenticated, loading driver data');
+          await _loadCurrentDriver(useAWS: true, cognitoService: cognito);
+        } else {
+          debugPrint('🔐 AWS: User is not authenticated');
+          _setLoading(false);
+        }
       } else {
-        debugPrint('🔐 User is not authenticated');
-        _setLoading(false);
+        await AuthService.initialize();
+        debugPrint('🔐 AuthService initialized successfully');
+
+        if (AuthService.isAuthenticated) {
+          debugPrint('🔐 User is authenticated, loading driver data');
+          await _loadCurrentDriver(useAWS: false);
+        } else {
+          debugPrint('🔐 User is not authenticated');
+          _setLoading(false);
+        }
       }
     } catch (e) {
       debugPrint('❌ AuthProvider initialization error: $e');
@@ -65,10 +81,15 @@ class Auth extends _$Auth {
   }
 
   /// Load current driver data and initialize real-time services
-  Future<void> _loadCurrentDriver() async {
+  Future<void> _loadCurrentDriver({
+    bool useAWS = false,
+    CognitoAuthService? cognitoService,
+  }) async {
     debugPrint('👤 Loading current driver data...');
     try {
-      final result = await AuthService.getCurrentDriver();
+      final result = useAWS
+          ? await (cognitoService ?? CognitoAuthService()).getCurrentDriver()
+          : await AuthService.getCurrentDriver();
 
       if (result['success']) {
         final driverData = result['data'];
@@ -80,7 +101,10 @@ class Auth extends _$Auth {
         debugPrint('✅ Driver data loaded successfully');
 
         // Initialize real-time communication service after successful authentication
-        await _initializeRealtimeServices();
+        final token = useAWS
+            ? CognitoAuthService.authToken
+            : AuthService.authToken;
+        await _initializeRealtimeServices(authToken: token);
       } else {
         state = state.copyWith(
           isAuthenticated: false,
@@ -102,7 +126,7 @@ class Auth extends _$Auth {
   }
 
   /// Initialize real-time communication services after authentication
-  Future<void> _initializeRealtimeServices() async {
+  Future<void> _initializeRealtimeServices({String? authToken}) async {
     final driver = state.currentDriver;
     if (driver == null) return;
 
@@ -114,7 +138,7 @@ class Auth extends _$Auth {
         driverId: driver['id'] ?? 'driver_123',
         driverName: driver['name'] ?? 'Unknown Driver',
         driverPhone: driver['phone'] ?? '+964 770 123 4567',
-        authToken: AuthService.authToken ?? 'mock_token',
+        authToken: authToken ?? AuthService.authToken ?? 'mock_token',
       );
 
       debugPrint('✅ Real-time communication services initialized successfully');

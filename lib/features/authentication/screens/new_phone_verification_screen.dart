@@ -1,14 +1,15 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../../../providers/riverpod/services_provider.dart';
+import '../../../services/logging/auth_logger.dart';
 
 import '../../../app_colors.dart';
-import '../../../providers/riverpod/services_provider.dart';
 import '../services/verification_throttle_service.dart';
 import '../utils/identity_normalizer.dart';
+import '../widgets/verification_code_input.dart';
 
 class NewPhoneVerificationScreen extends ConsumerStatefulWidget {
   final String phoneNumber;
@@ -25,12 +26,14 @@ class NewPhoneVerificationScreen extends ConsumerStatefulWidget {
 
 class _NewPhoneVerificationScreenState
     extends ConsumerState<NewPhoneVerificationScreen> {
-  final List<TextEditingController> _controllers =
-      List.generate(6, (_) => TextEditingController());
-  final List<FocusNode> _focusNodes = List.generate(6, (_) => FocusNode());
   bool _isLoading = false;
   bool _isResending = false;
   late final String _normalizedPhone;
+  String _currentCode = '';
+  String? _errorMessage;
+  Key _otpWidgetKey = UniqueKey();
+
+  AuthLogger get _logger => AuthLogger();
 
   @override
   void initState() {
@@ -39,43 +42,37 @@ class _NewPhoneVerificationScreenState
     // Start initial cooldown when arriving (simulate first send already done)
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(verificationThrottleProvider.notifier).recordSend(_normalizedPhone);
+      _logger.logSendCode(
+        identity: _normalizedPhone,
+        channel: 'phone',
+        purpose: 'signup',
+        attempt: 1,
+        cooldownSeconds: ref.read(verificationThrottleProvider).identityState(_normalizedPhone).currentCooldownDuration,
+      );
     });
   }
 
   @override
   void dispose() {
-    for (var controller in _controllers) {
-      controller.dispose();
-    }
-    for (var focusNode in _focusNodes) {
-      focusNode.dispose();
-    }
     super.dispose();
   }
 
-  String get _verificationCode {
-    return _controllers.map((controller) => controller.text).join();
-  }
-
   bool get _isCodeComplete {
-    return _verificationCode.length == 6 && _verificationCode.replaceAll(RegExp(r'\D'), '').length == 6;
+    return _currentCode.length == 6 && _currentCode.replaceAll(RegExp(r'\D'), '').length == 6;
   }
 
-  void _onCodeChanged(int index, String value) {
+  void _onCodeChanged(String code) {
     setState(() {
+      _currentCode = code;
       _errorMessage = null;
     });
+  }
 
-    if (value.length == 1 && index < 5) {
-      _focusNodes[index + 1].requestFocus();
-    } else if (value.isEmpty && index > 0) {
-      _focusNodes[index - 1].requestFocus();
-    }
-
-    // Auto-verify when all digits are entered
-    if (_isCodeComplete) {
-      _verifyCode();
-    }
+  void _resetCode() {
+    setState(() {
+      _currentCode = '';
+      _otpWidgetKey = UniqueKey();
+    });
   }
 
   Future<void> _verifyCode() async {
@@ -96,37 +93,49 @@ class _NewPhoneVerificationScreenState
     try {
       final result = await authService.verifyPhoneNumber(
         phone: widget.phoneNumber,
-        verificationCode: _verificationCode,
+        verificationCode: _currentCode,
       );
 
       if (result['success'] == true) {
         if (mounted) {
-          // Navigate to main app
           context.go('/navigation');
         }
+        _logger.logVerifyCode(
+          identity: _normalizedPhone,
+          channel: 'phone',
+          purpose: 'signup',
+          success: true,
+        );
       } else {
         setState(() {
           _errorMessage = result['message'] ?? 'الرمز غير صحيح، يرجى المحاولة مرة أخرى';
-          _clearCode();
+          _resetCode();
         });
+        _logger.logVerifyCode(
+          identity: _normalizedPhone,
+          channel: 'phone',
+          purpose: 'signup',
+          success: false,
+          failureReason: 'code_mismatch',
+        );
       }
     } catch (e) {
       setState(() {
         _errorMessage = 'حدث خطأ أثناء التحقق. يرجى المحاولة مرة أخرى';
-        _clearCode();
+        _resetCode();
       });
+      _logger.logVerifyCode(
+        identity: _normalizedPhone,
+        channel: 'phone',
+        purpose: 'signup',
+        success: false,
+        failureReason: 'exception',
+      );
     } finally {
       setState(() {
         _isLoading = false;
       });
     }
-  }
-
-  void _clearCode() {
-    for (var controller in _controllers) {
-      controller.clear();
-    }
-    _focusNodes[0].requestFocus();
   }
 
   int get _resendCooldown {
@@ -150,14 +159,35 @@ class _NewPhoneVerificationScreenState
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم إرسال رمز التحقق الجديد'), backgroundColor: Colors.green));
         }
+        _logger.logSendCode(
+          identity: _normalizedPhone,
+          channel: 'phone',
+          purpose: 'signup',
+          attempt: ref.read(verificationThrottleProvider).identityState(_normalizedPhone).recentSends.length,
+          cooldownSeconds: ref.read(verificationThrottleProvider).identityState(_normalizedPhone).currentCooldownDuration,
+        );
       } else {
         final msg = result['message'] ?? 'فشل في إرسال الرمز. يرجى المحاولة مرة أخرى';
         notifier.setError(_normalizedPhone, msg);
         setState(() { _errorMessage = msg; });
+        _logger.logSendCode(
+          identity: _normalizedPhone,
+          channel: 'phone',
+          purpose: 'signup',
+          attempt: ref.read(verificationThrottleProvider).identityState(_normalizedPhone).recentSends.length + 1,
+          cooldownSeconds: ref.read(verificationThrottleProvider).identityState(_normalizedPhone).currentCooldownDuration,
+        );
       }
     } catch (e) {
       notifier.setError(_normalizedPhone, 'حدث خطأ أثناء إرسال الرمز');
       setState(() { _errorMessage = 'حدث خطأ أثناء إرسال الرمز'; });
+      _logger.logSendCode(
+        identity: _normalizedPhone,
+        channel: 'phone',
+        purpose: 'signup',
+        attempt: ref.read(verificationThrottleProvider).identityState(_normalizedPhone).recentSends.length + 1,
+        cooldownSeconds: ref.read(verificationThrottleProvider).identityState(_normalizedPhone).currentCooldownDuration,
+      );
     } finally {
       notifier.setSending(_normalizedPhone, false);
       if (mounted) setState(() { _isResending = false; });
@@ -245,52 +275,12 @@ class _NewPhoneVerificationScreenState
 
             const SizedBox(height: 40),
 
-            // OTP Input Fields
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: List.generate(6, (index) {
-                return SizedBox(
-                  width: 45,
-                  height: 55,
-                  child: TextField(
-                    controller: _controllers[index],
-                    focusNode: _focusNodes[index],
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                      color: AppColors.textPrimary,
-                    ),
-                    keyboardType: TextInputType.number,
-                    inputFormatters: [
-                      LengthLimitingTextInputFormatter(1),
-                      FilteringTextInputFormatter.digitsOnly,
-                    ],
-                    decoration: InputDecoration(
-                      filled: true,
-                      fillColor: AppColors.background,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide(color: AppColors.textSecondary.withAlpha(77)),
-                      ),
-                      enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide(color: AppColors.textSecondary.withAlpha(77)),
-                      ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide(color: AppColors.primary, width: 2),
-                      ),
-                      errorBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: const BorderSide(color: Colors.red, width: 2),
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(vertical: 16),
-                    ),
-                    onChanged: (value) => _onCodeChanged(index, value),
-                  ),
-                );
-              }),
+            // OTP Input replaced with reusable widget
+            VerificationCodeInput(
+              key: _otpWidgetKey,
+              enabled: !_isLoading,
+              onChanged: _onCodeChanged,
+              onCompleted: (_) => _verifyCode(),
             ),
 
             const SizedBox(height: 24),

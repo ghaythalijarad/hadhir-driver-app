@@ -1,12 +1,11 @@
-// ignore_for_file: avoid_print
 #!/usr/bin/env dart
+// ignore_for_file: avoid_print
 
 // Test script to verify real AWS Cognito registration
 // Run with: dart test_real_cognito.dart
 
 import 'dart:io';
 import 'dart:convert';
-import 'package:http/http.dart' as http;
 
 void main() async {
   print('Testing Real AWS Cognito Configuration...');

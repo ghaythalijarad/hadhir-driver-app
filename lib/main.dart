@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+// Updated email verification configuration
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart' as riverpod;
 import 'package:provider/provider.dart' as provider;
@@ -9,7 +11,6 @@ import 'app_colors.dart';
 import 'config/app_config.dart';
 import 'core/app_controller.dart';
 import 'l10n/app_localizations.dart';
-import 'providers/auth_provider.dart' as legacy_auth;
 import 'providers/riverpod/router_provider.dart';
 import 'amplifyconfiguration.dart';
 import 'services/demand_analysis_service.dart';
@@ -24,6 +25,8 @@ import 'features/earnings/earnings_tab.dart';
 import 'features/more/more_tab.dart';
 
 void main() async {
+  // Trigger hot reload for SSO debug button and comprehensive tests
+  print('Hot reload triggered at ${DateTime.now()} - SSO test added');
   WidgetsFlutterBinding.ensureInitialized();
 
   // Initialize app configuration with AWS Cognito integration
@@ -85,9 +88,6 @@ class MyApp extends riverpod.ConsumerWidget {
     // This MultiProvider is for legacy providers. We should migrate these to Riverpod.
     return provider.MultiProvider(
       providers: [
-        provider.ChangeNotifierProvider(
-          create: (_) => legacy_auth.AuthProvider(),
-        ),
         provider.ChangeNotifierProvider(create: (_) => LocationService()),
         provider.ChangeNotifierProvider(create: (_) => OrderService()),
         provider.ChangeNotifierProvider(
@@ -152,6 +152,7 @@ class DriverHomePage extends StatefulWidget {
 
 class _DriverHomePageState extends State<DriverHomePage> {
   int _selectedIndex = 0;
+  Timer? _queueTimer; // periodic retry timer
 
   @override
   void initState() {
@@ -160,7 +161,24 @@ class _DriverHomePageState extends State<DriverHomePage> {
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initializeAppController();
+      _processPendingQueue(initial: true);
+      _startQueueTimer();
     });
+  }
+
+  void _startQueueTimer() {
+    _queueTimer?.cancel();
+    _queueTimer = Timer.periodic(const Duration(minutes: 10), (_) => _processPendingQueue());
+  }
+
+  Future<void> _processPendingQueue({bool initial = false}) async {
+    try {
+      debugPrint('RetryQueue: Processing pending registration queue (initial=$initial)');
+      // TODO: Re-enable when processPendingRegistrationQueue method is implemented
+      // await AWSDynamoDBService().processPendingRegistrationQueue(maxBatch: 5);
+    } catch (e) {
+      debugPrint('RetryQueue: Error processing queue: $e');
+    }
   }
 
   Future<void> _initializeAppController() async {

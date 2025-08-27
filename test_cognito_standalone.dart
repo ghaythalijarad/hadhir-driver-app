@@ -1,5 +1,4 @@
 // ignore_for_file: avoid_print
-import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:amplify_flutter/amplify_flutter.dart';
 import 'package:amplify_auth_cognito/amplify_auth_cognito.dart';

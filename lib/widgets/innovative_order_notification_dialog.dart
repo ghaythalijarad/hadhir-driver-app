@@ -157,7 +157,6 @@ class _InnovativeOrderNotificationDialogState
   Widget build(BuildContext context) {
     final batch = widget.batchedOrder;
     final isSingleOrder = batch.orders.length == 1;
-    final textScale = MediaQuery.of(context).textScaler.scale(1.0); // updated for newer Flutter
 
     return Material(
       color: Colors.transparent,
@@ -808,7 +807,6 @@ class _InnovativeOrderNotificationDialogState
       padding: const EdgeInsets.fromLTRB(28, 20, 28, 28),
       child: Row(
         children: [
-          // Reject button
           Expanded(
             child: Semantics(
               button: true,
@@ -827,17 +825,12 @@ class _InnovativeOrderNotificationDialogState
                 ),
                 child: const Text(
                   'رفض',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.white,
-                  ),
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white),
                 ),
               ),
             ),
           ),
           const SizedBox(width: 16),
-          // Accept button with pulse animation
           Expanded(
             child: AnimatedBuilder(
               animation: _pulseController,
@@ -852,9 +845,7 @@ class _InnovativeOrderNotificationDialogState
                       style: ElevatedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(vertical: 18),
                         backgroundColor: AppColors.success,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(24),
-                        ),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
                         elevation: 15,
                         shadowColor: AppColors.success.withAlpha(128),
                       ),
@@ -863,10 +854,7 @@ class _InnovativeOrderNotificationDialogState
                         children: [
                           Container(
                             padding: const EdgeInsets.all(8),
-                            decoration: const BoxDecoration(
-                              color: Colors.white24,
-                              shape: BoxShape.circle,
-                            ),
+                            decoration: const BoxDecoration(color: Colors.white24, shape: BoxShape.circle),
                             child: const Icon(Icons.check_circle, size: 24),
                           ),
                           const SizedBox(width: 12),
@@ -881,8 +869,8 @@ class _InnovativeOrderNotificationDialogState
                         ],
                       ),
                     ),
-                  );
-                };
+                  ),
+                );
               },
             ),
           ),

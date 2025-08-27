@@ -1,116 +1,55 @@
-## AWS Cognito Registration Backend Implementation
+# AWS Cognito + DynamoDB Driver Profile Architecture (Dev)
 
-### Summary
+## Summary
 
-Successfully implemented AWS Cognito user registration and authentication backend using the provided User Pool credentials:
+- Registration uses Cognito only for core attributes (email/phone, name).
+- Custom driver attributes were removed from Cognito; extended data is stored in DynamoDB.
+- Post Confirmation Lambda creates a baseline driver profile in table `DriverProfiles_dev`.
+- HTTP API (API Gateway v2) with Cognito JWT authorizer exposes GET/PUT `/driver/me`.
+- Flutter app fetches and updates the profile via this API using the Cognito access token.
 
-**AWS Configuration:**
+## AWS Resources (provisioned by backend/deploy.py)
 
-- Region: `us-east-1`
-- User Pool ID: `us-east-1_usoTs2VtS`
-- User Pool Name: `wizzgo-dev-users`
-- App Client ID: `7ak005suept85gp6l2vlg4jkbu`
-- App Client Name: `wizzgo-dev-driver-app`
+1) DynamoDB table: `DriverProfiles_dev`
+   - PK: driverId (String)
+   - GSIs: email-index, phone-index
+   - Billing: On-Demand
+   - SSE: Enabled
 
-### Files Modified/Created
+2) Lambdas
+   - `driver-profile-post-confirmation`: Cognito trigger, PutItem baseline profile
+   - `driver-profile-api`: HTTP API handler, GET/PUT `/driver/me`
 
-#### 1. Core Services
+3) API Gateway HTTP API
+   - Name: `driver-profile-api-dev`
+   - Authorizer: JWT (Issuer = Cognito User Pool, Audience = App Client ID)
+   - Routes: GET `/driver/me`, PUT `/driver/me`
 
-- **`lib/services/cognito_auth_service.dart`** - New AWS Cognito authentication service
-  - User registration with email/phone
-  - Login with email/phone  
-  - Email and phone verification
-  - Password reset functionality
-  - Custom driver attributes (city, vehicle_type, license_number, national_id)
-  - Arabic error messages
+4) IAM
+   - Trigger Lambda role: dynamodb:PutItem + logs
+   - API Lambda role: dynamodb:GetItem, dynamodb:UpdateItem + logs
 
-#### 2. Configuration Files
+## App Integration
 
-- **`lib/config/environment.dart`** - Updated with real Cognito credentials
-- **`lib/amplifyconfiguration.dart`** - Valid Amplify config with User Pool settings
-- **`amplifyconfiguration.json`** - JSON config file with matching credentials
+- `AWSDynamoDBService`
+  - configure(baseUrl, authToken)
+  - GET `/driver/me` with retry/backoff after confirmation
+  - PUT `/driver/me` to save registration and to update fields
+- `CognitoAuthService`
+  - After sign-in: configures AWSDynamoDBService and merges profile
+  - After phone confirmation: warms read and persists pending registration fields
+- `DriverService`
+  - If AWS enabled, reads/updates via HTTP API; otherwise uses legacy ApiService
 
-#### 3. Provider Updates
+## Pending/Actions
 
-- **`lib/providers/riverpod/services_provider.dart`** - Added Cognito service provider and dynamic auth service selection
+- Set Environment.apiBaseUrl to deployed value: https://{apiId}.execute-api.{region}.amazonaws.com/dev
+- Re-run deploy.py with --app-client-id vjcumd2cck66kprpc86nmgs9t if audience not set
+- Wire profile screens to update via DriverService (now backed by AWSDynamoDBService)
+- Tests: signup -> confirmation -> GET `/driver/me` exists (with retry)
+- Security: keep least privilege; consider KMS CMK, redact PII in logs
 
-#### 4. UI Integration  
+## Notes
 
-- **`lib/features/authentication/screens/new_driver_signup_screen.dart`** - Updated to use Cognito for registration
-- **`lib/features/authentication/screens/new_login_screen.dart`** - Updated to use Cognito for login
-
-#### 5. App Configuration
-
-- **`lib/config/app_config.dart`** - Enhanced with AWS integration toggle
-- **`lib/main.dart`** - Added Amplify initialization with proper configuration guard
-
-### Key Features Implemented
-
-1. **Dual Mode Support**: App can switch between AWS Cognito and mock authentication based on `AppConfig.enableAWSIntegration`
-
-2. **Registration Flow**:
-   - Email-based registration with custom driver attributes
-   - Phone-based registration (international format conversion)
-   - Email/SMS verification handling
-   - Error handling with Arabic messages
-
-3. **Authentication Flow**:
-   - Login with email or phone
-   - Session token management
-   - Legacy provider integration for router compatibility
-
-4. **User Profile Management**:
-   - Driver-specific custom attributes stored in Cognito
-   - Profile retrieval with all driver data
-
-5. **Error Handling**:
-   - Comprehensive Arabic error messages
-   - Proper exception handling for all Cognito operations
-
-### Technical Implementation Details
-
-**Custom Attributes in Cognito:**
-
-```dart
-custom:city          // Driver's city/governorate
-custom:vehicle_type  // Type of delivery vehicle
-custom:license_number // Driving license number  
-custom:national_id   // National ID number
-```
-
-**Authentication Methods:**
-
-- Email + Password
-- Phone (Iraqi format: 07XXXXXXXXX converted to +964XXXXXXXXX) + Password
-
-**Verification Support:**
-
-- Email confirmation codes
-- SMS verification codes
-- Resend confirmation functionality
-
-### Current Status
-
-- ✅ AWS Cognito service implemented
-- ✅ Configuration files updated with real credentials
-- ✅ UI screens integrated with Cognito backend
-- ✅ Compile errors resolved
-- 🔄 iOS app build in progress for testing
-
-### Next Steps for Testing
-
-1. Test user registration with email
-2. Test user registration with phone
-3. Test email/SMS verification flows
-4. Test login with registered credentials
-5. Verify navigation to main app screen after successful login
-6. Test error scenarios (duplicate users, invalid credentials, etc.)
-
-### Configuration Notes
-
-- AWS integration is currently enabled by default (`AppConfig.setAWSIntegration(true)`)
-- App Client ID and User Pool credentials are correctly configured
-- Amplify is initialized with proper error handling and re-configuration guards
-- Custom attributes need to be configured in the AWS Cognito Console if not already present
-
-The implementation provides a complete registration and authentication backend using AWS Cognito, with fallback to mock authentication for offline development.
+- Iraqi phone normalization enforced; Arabic error messages included.
+- Baseline status values: PENDING_PROFILE -> PENDING_REVIEW -> VERIFIED.

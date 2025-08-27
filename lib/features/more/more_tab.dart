@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:provider/provider.dart';
 
 import '../../app_colors.dart';
 import '../../models/driver_profile.dart';
-import '../../providers/auth_provider.dart';
+import '../../providers/riverpod/services_provider.dart';
 import '../../services/driver_service.dart';
 import '../../test_cognito_registration.dart';
 import 'screens/account_details_screen.dart';
@@ -17,17 +17,17 @@ import 'screens/payment_methods_screen.dart';
 import 'screens/support_screen.dart';
 import 'screens/vehicle_info_screen.dart';
 
-class MoreTab extends StatefulWidget {
+class MoreTab extends ConsumerStatefulWidget {
   final ValueChanged<bool>? onDashStatusChanged;
   final bool isDashing;
 
   const MoreTab({super.key, this.onDashStatusChanged, this.isDashing = false});
 
   @override
-  State<MoreTab> createState() => _MoreTabState();
+  ConsumerState<MoreTab> createState() => _MoreTabState();
 }
 
-class _MoreTabState extends State<MoreTab> {
+class _MoreTabState extends ConsumerState<MoreTab> {
   DriverProfile? _driverProfile;
   bool _isLoading = true;
   bool _isHotspotActive = false;
@@ -837,9 +837,9 @@ class _MoreTabState extends State<MoreTab> {
         ),
       );
 
-      // Use AuthProvider for logout
-      final authProvider = Provider.of<AuthProvider>(context, listen: false);
-      await authProvider.logout();
+      // Use auth service for logout
+      final authService = ref.read(authServiceProvider);
+      await authService.logout();
 
       if (mounted) Navigator.pop(context); // Close loading dialog
 

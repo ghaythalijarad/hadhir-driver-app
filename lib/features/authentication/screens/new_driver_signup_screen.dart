@@ -6,6 +6,7 @@ import '../../../app_colors.dart';
 import '../../../config/app_config.dart';
 import '../../../providers/riverpod/services_provider.dart';
 import '../../../services/new_auth_service.dart';
+import '../../../widgets/file_upload_widget.dart';
 
 class NewDriverSignupScreen extends ConsumerStatefulWidget {
   const NewDriverSignupScreen({super.key});
@@ -45,6 +46,11 @@ class _NewDriverSignupScreenState extends ConsumerState<NewDriverSignupScreen>
   final _passwordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
 
+  // Document upload state
+  Map<String, dynamic>? _drivingLicenseFile;
+  Map<String, dynamic>? _vehicleRegistrationFile;
+  Map<String, dynamic>? _nonCriminalRecordFile;
+
   final List<String> _iraqiCities = [
     'بغداد',
     'البصرة',
@@ -66,11 +72,9 @@ class _NewDriverSignupScreenState extends ConsumerState<NewDriverSignupScreen>
   ];
 
   final List<String> _vehicleTypes = [
-    'سيارة شخصية',
-    'دراجة نارية',
-    'شاحنة صغيرة',
-    'فان',
-    'سيارة كهربائية',
+    'دراجة', // bike
+    'دراجة نارية', // motorcycle
+    'سيارة', // car
   ];
 
   @override
@@ -166,6 +170,9 @@ class _NewDriverSignupScreenState extends ConsumerState<NewDriverSignupScreen>
             vehicleType: _vehicleTypeController.text,
             licenseNumber: _licenseNumberController.text.trim(),
             nationalId: _nationalIdController.text.trim(),
+            drivingLicenseFile: _drivingLicenseFile,
+            vehicleRegistrationFile: _vehicleRegistrationFile,
+            nonCriminalRecordFile: _nonCriminalRecordFile,
           );
         } else {
           result = await cognitoService.registerWithPhone(
@@ -176,6 +183,9 @@ class _NewDriverSignupScreenState extends ConsumerState<NewDriverSignupScreen>
             vehicleType: _vehicleTypeController.text,
             licenseNumber: _licenseNumberController.text.trim(),
             nationalId: _nationalIdController.text.trim(),
+            drivingLicenseFile: _drivingLicenseFile,
+            vehicleRegistrationFile: _vehicleRegistrationFile,
+            nonCriminalRecordFile: _nonCriminalRecordFile,
           );
         }
       } else {
@@ -192,6 +202,9 @@ class _NewDriverSignupScreenState extends ConsumerState<NewDriverSignupScreen>
             vehicleType: _vehicleTypeController.text,
             licenseNumber: _licenseNumberController.text.trim(),
             nationalId: _nationalIdController.text.trim(),
+            drivingLicenseFile: _drivingLicenseFile,
+            vehicleRegistrationFile: _vehicleRegistrationFile,
+            nonCriminalRecordFile: _nonCriminalRecordFile,
           );
         } else {
           result = await authService.registerWithPhone(
@@ -202,6 +215,9 @@ class _NewDriverSignupScreenState extends ConsumerState<NewDriverSignupScreen>
             vehicleType: _vehicleTypeController.text,
             licenseNumber: _licenseNumberController.text.trim(),
             nationalId: _nationalIdController.text.trim(),
+            drivingLicenseFile: _drivingLicenseFile,
+            vehicleRegistrationFile: _vehicleRegistrationFile,
+            nonCriminalRecordFile: _nonCriminalRecordFile,
           );
         }
       }
@@ -321,6 +337,11 @@ class _NewDriverSignupScreenState extends ConsumerState<NewDriverSignupScreen>
         ],
       ),
     );
+  }
+
+  bool _requiresVehicleDocs() {
+    final t = _vehicleTypeController.text;
+    return t == 'دراجة نارية' || t == 'سيارة';
   }
 
   @override
@@ -836,7 +857,9 @@ class _NewDriverSignupScreenState extends ConsumerState<NewDriverSignupScreen>
                 );
               }).toList(),
               onChanged: (value) {
-                _vehicleTypeController.text = value ?? '';
+                setState(() {
+                  _vehicleTypeController.text = value ?? '';
+                });
               },
               validator: (value) {
                 if (value == null || value.isEmpty) {
@@ -847,35 +870,137 @@ class _NewDriverSignupScreenState extends ConsumerState<NewDriverSignupScreen>
             ),
             const SizedBox(height: 16),
 
-            // License Number
-            TextFormField(
-              controller: _licenseNumberController,
-              textAlign: TextAlign.right,
-              style: TextStyle(color: AppColors.textPrimary),
-              decoration: InputDecoration(
-                labelText: 'رقم رخصة القيادة',
-                labelStyle: TextStyle(color: AppColors.textSecondary),
-                prefixIcon: Icon(Icons.credit_card, color: AppColors.primary),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: BorderSide(color: AppColors.border),
+            if (_requiresVehicleDocs()) ...[
+              // License Number (only for car/motorcycle)
+              TextFormField(
+                controller: _licenseNumberController,
+                textAlign: TextAlign.right,
+                style: TextStyle(color: AppColors.textPrimary),
+                decoration: InputDecoration(
+                  labelText: 'رقم رخصة القيادة',
+                  labelStyle: TextStyle(color: AppColors.textSecondary),
+                  prefixIcon: Icon(Icons.credit_card, color: AppColors.primary),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: AppColors.border),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: AppColors.primary, width: 2),
+                  ),
+                  filled: true,
+                  fillColor: AppColors.surface,
                 ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: BorderSide(color: AppColors.primary, width: 2),
-                ),
-                filled: true,
-                fillColor: AppColors.surface,
+                validator: (value) {
+                  if (!_requiresVehicleDocs()) return null;
+                  if (value == null || value.trim().isEmpty) {
+                    return 'يرجى إدخال رقم رخصة القيادة';
+                  }
+                  if (value.trim().length < 5) {
+                    return 'رقم رخصة القيادة غير صحيح';
+                  }
+                  return null;
+                },
               ),
-              validator: (value) {
-                if (value == null || value.trim().isEmpty) {
-                  return 'يرجى إدخال رقم رخصة القيادة';
-                }
-                if (value.trim().length < 5) {
-                  return 'رقم رخصة القيادة غير صحيح';
+              const SizedBox(height: 16),
+
+              // Driving License File Upload
+              FormField<bool>(
+                validator: (_) {
+                  if (_requiresVehicleDocs() && _drivingLicenseFile == null) {
+                    return 'مطلوب رفع صورة رخصة القيادة';
+                  }
+                  return null;
+                },
+                builder: (state) => Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    FileUploadWidget(
+                      label: 'صورة رخصة القيادة',
+                      isRequired: _requiresVehicleDocs(),
+                      onFileSelected: (f) {
+                        setState(() { _drivingLicenseFile = f; });
+                        state.didChange(true);
+                      },
+                      onFileRemoved: () {
+                        setState(() { _drivingLicenseFile = null; });
+                        state.didChange(null);
+                      },
+                    ),
+                    if (state.hasError)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(state.errorText!, style: const TextStyle(color: Colors.red, fontSize: 12)),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+
+              // Vehicle Registration File Upload
+              FormField<bool>(
+                validator: (_) {
+                  if (_requiresVehicleDocs() && _vehicleRegistrationFile == null) {
+                    return 'مطلوب رفع أوراق المركبة';
+                  }
+                  return null;
+                },
+                builder: (state) => Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    FileUploadWidget(
+                      label: 'أوراق المركبة (السنوية / التسجيل)',
+                      isRequired: _requiresVehicleDocs(),
+                      onFileSelected: (f) {
+                        setState(() { _vehicleRegistrationFile = f; });
+                        state.didChange(true);
+                      },
+                      onFileRemoved: () {
+                        setState(() { _vehicleRegistrationFile = null; });
+                        state.didChange(null);
+                      },
+                    ),
+                    if (state.hasError)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(state.errorText!, style: const TextStyle(color: Colors.red, fontSize: 12)),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+
+            // Non-Criminal Record (always required)
+            FormField<bool>(
+              validator: (_) {
+                if (_nonCriminalRecordFile == null) {
+                  return 'مطلوب رفع شهادة عدم محكومية';
                 }
                 return null;
               },
+              builder: (state) => Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  FileUploadWidget(
+                    label: 'شهادة عدم محكومية',
+                    isRequired: true,
+                    onFileSelected: (f) {
+                      setState(() { _nonCriminalRecordFile = f; });
+                      state.didChange(true);
+                    },
+                    onFileRemoved: () {
+                      setState(() { _nonCriminalRecordFile = null; });
+                      state.didChange(null);
+                    },
+                  ),
+                  if (state.hasError)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(state.errorText!, style: const TextStyle(color: Colors.red, fontSize: 12)),
+                    ),
+                ],
+              ),
             ),
             const SizedBox(height: 20),
 
@@ -900,7 +1025,9 @@ class _NewDriverSignupScreenState extends ConsumerState<NewDriverSignupScreen>
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    '• رخصة قيادة سارية المفعول\n'
+                    '• رخصة قيادة (للمركبات والدراجات النارية)\n'
+                    '• أوراق المركبة (للمركبات والدراجات النارية)\n'
+                    '• شهادة عدم محكومية (إلزامية)\n'
                     '• مركبة صالحة للتوصيل\n'
                     '• هوية وطنية صحيحة\n'
                     '• هاتف ذكي مع اتصال إنترنت',

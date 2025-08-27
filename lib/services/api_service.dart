@@ -64,15 +64,12 @@ class ApiService {
     );
 
     return _handleResponse(response);
-  } // Driver profile
+  } // Driver profile (deprecated)
 
   static Future<Map<String, dynamic>> getDriverProfile() async {
-    final response = await http.get(
-      Uri.parse('$_cityEndpoint/driver/profile'),
-      headers: _headers,
+    throw Exception(
+      'Legacy profile API deprecated. Use AWS /driver/me via AWSDynamoDBService.',
     );
-
-    return _handleResponse(response);
   }
 
   // Orders management

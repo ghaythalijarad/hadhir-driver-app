@@ -37,7 +37,7 @@ class _FileUploadWidgetState extends State<FileUploadWidget> {
   Map<String, dynamic>? _selectedFile;
   bool _isLoading = false;
 
-  Future<void> _pickImage() async {
+  Future<void> _pickImage({ImageSource source = ImageSource.gallery}) async {
     try {
       setState(() {
         _isLoading = true;
@@ -45,7 +45,7 @@ class _FileUploadWidgetState extends State<FileUploadWidget> {
 
       final ImagePicker picker = ImagePicker();
       final XFile? image = await picker.pickImage(
-        source: ImageSource.gallery,
+        source: source,
         maxWidth: 1920,
         maxHeight: 1080,
         imageQuality: 85,
@@ -180,16 +180,18 @@ class _FileUploadWidgetState extends State<FileUploadWidget> {
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 20),
+              
+              // First row - Camera and Gallery
               Row(
                 children: [
                   Expanded(
                     child: ElevatedButton.icon(
                       onPressed: () {
                         Navigator.pop(context);
-                        _pickImage();
+                        _pickImage(source: ImageSource.camera);
                       },
-                      icon: const Icon(Icons.photo_library),
-                      label: const Text('معرض الصور'),
+                      icon: const Icon(Icons.camera_alt),
+                      label: const Text('الكاميرا'),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: AppColors.primary,
                         foregroundColor: Colors.white,
@@ -202,18 +204,37 @@ class _FileUploadWidgetState extends State<FileUploadWidget> {
                     child: ElevatedButton.icon(
                       onPressed: () {
                         Navigator.pop(context);
-                        _pickDocument();
+                        _pickImage(source: ImageSource.gallery);
                       },
-                      icon: const Icon(Icons.folder),
-                      label: const Text('اختيار ملف'),
+                      icon: const Icon(Icons.photo_library),
+                      label: const Text('معرض الصور'),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.secondary,
+                        backgroundColor: AppColors.primary,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(vertical: 12),
                       ),
                     ),
                   ),
                 ],
+              ),
+              const SizedBox(height: 12),
+              
+              // Second row - Document picker
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _pickDocument();
+                  },
+                  icon: const Icon(Icons.description),
+                  label: const Text('اختيار ملف PDF'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.secondary,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                ),
               ),
               const SizedBox(height: 12),
               TextButton(

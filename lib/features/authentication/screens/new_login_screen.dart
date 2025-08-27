@@ -1,11 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:provider/provider.dart' as provider;
 
 import '../../../app_colors.dart';
 import '../../../config/app_config.dart';
-import '../../../providers/auth_provider.dart' as legacy_auth;
 import '../../../providers/riverpod/services_provider.dart';
 import '../../../services/new_auth_service.dart';
 
@@ -119,9 +117,6 @@ class _NewLoginScreenState extends ConsumerState<NewLoginScreen>
       if (mounted) {
         if (success) {
           // Update legacy auth provider for router compatibility
-          final legacyAuthProvider = provider
-              .Provider.of<legacy_auth.AuthProvider>(context, listen: false);
-          legacyAuthProvider.setAuthenticatedForTesting(true);
 
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -436,6 +431,58 @@ class _NewLoginScreenState extends ConsumerState<NewLoginScreen>
                           ),
                         ),
                       ),
+
+                      const SizedBox(height: 16),
+
+                      // Debug buttons for email testing (only in debug mode)
+                      if (AppConfig.isDevelopment)
+                        Column(
+                          children: [
+                            SizedBox(
+                              width: double.infinity,
+                              child: ElevatedButton(
+                                onPressed: () => context.push('/sso-email-test'),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.blue,
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(vertical: 12),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                                child: const Text(
+                                  'DEBUG: SSO Email Test',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            SizedBox(
+                              width: double.infinity,
+                              child: ElevatedButton(
+                                onPressed: () => context.push('/comprehensive-email-test'),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.orange,
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(vertical: 12),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                                child: const Text(
+                                  'DEBUG: Comprehensive Test',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
 
                       const SizedBox(height: 24),
                     ],

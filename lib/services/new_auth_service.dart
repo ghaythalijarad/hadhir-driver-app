@@ -5,10 +5,12 @@ import 'package:amplify_flutter/amplify_flutter.dart';
 
 import '../config/app_config.dart';
 import 'driver_websocket_service.dart';
+import '../services/logging/auth_logger.dart';
 
 /// Authentication service supporting both offline mock and AWS Cognito.
 class NewAuthService {
   final DriverWebSocketService _webSocketService;
+  final AuthLogger? _logger;
 
   static String? _authToken;
   static String? get authToken => _authToken;
@@ -27,8 +29,9 @@ class NewAuthService {
     },
   };
 
-  NewAuthService({required DriverWebSocketService webSocketService})
-    : _webSocketService = webSocketService;
+  NewAuthService({required DriverWebSocketService webSocketService, AuthLogger? logger})
+    : _webSocketService = webSocketService,
+      _logger = logger;
 
   Future<void> initialize() async {
     final prefs = await SharedPreferences.getInstance();
@@ -70,6 +73,7 @@ class NewAuthService {
     required String email,
     required String password,
   }) async {
+    _logger?.logLoginAttempt(identity: email, channel: 'email');
     if (AppConfig.enableAWSIntegration) {
       try {
         final res = await Amplify.Auth.signIn(
@@ -79,15 +83,18 @@ class NewAuthService {
         if (res.isSignedIn) {
           await _saveToken('cognito_${DateTime.now().millisecondsSinceEpoch}');
           await _autoConnectWebSocket();
+          _logger?.logLoginResult(identity: email, channel: 'email', success: true);
           return true;
         }
-        // Handle next steps (e.g., MFA) as not supported in this flow
+        _logger?.logLoginResult(identity: email, channel: 'email', success: false, failureReason: 'next_step');
         return false;
       } on AuthException catch (e) {
         safePrint('Cognito signIn (email) failed: ${e.message}');
+        _logger?.logLoginResult(identity: email, channel: 'email', success: false, failureReason: e.runtimeType.toString());
         return false;
       } catch (e) {
         safePrint('Cognito signIn (email) error: $e');
+        _logger?.logLoginResult(identity: email, channel: 'email', success: false, failureReason: 'exception');
         return false;
       }
     }
@@ -98,8 +105,10 @@ class NewAuthService {
     if (user != null && user['password'] == password) {
       await _saveToken('mock_token_${DateTime.now().millisecondsSinceEpoch}');
       await _autoConnectWebSocket();
+      _logger?.logLoginResult(identity: email, channel: 'email', success: true);
       return true;
     }
+    _logger?.logLoginResult(identity: email, channel: 'email', success: false, failureReason: 'invalid_credentials');
     return false;
   }
 
@@ -108,6 +117,7 @@ class NewAuthService {
     required String phone,
     required String password,
   }) async {
+    _logger?.logLoginAttempt(identity: phone, channel: 'phone');
     if (AppConfig.enableAWSIntegration) {
       try {
         final res = await Amplify.Auth.signIn(
@@ -117,14 +127,18 @@ class NewAuthService {
         if (res.isSignedIn) {
           await _saveToken('cognito_${DateTime.now().millisecondsSinceEpoch}');
           await _autoConnectWebSocket();
+          _logger?.logLoginResult(identity: phone, channel: 'phone', success: true);
           return true;
         }
+        _logger?.logLoginResult(identity: phone, channel: 'phone', success: false, failureReason: 'next_step');
         return false;
       } on AuthException catch (e) {
         safePrint('Cognito signIn (phone) failed: ${e.message}');
+        _logger?.logLoginResult(identity: phone, channel: 'phone', success: false, failureReason: e.runtimeType.toString());
         return false;
       } catch (e) {
         safePrint('Cognito signIn (phone) error: $e');
+        _logger?.logLoginResult(identity: phone, channel: 'phone', success: false, failureReason: 'exception');
         return false;
       }
     }
@@ -135,8 +149,10 @@ class NewAuthService {
     if (user != null && user['password'] == password) {
       await _saveToken('mock_token_${DateTime.now().millisecondsSinceEpoch}');
       await _autoConnectWebSocket();
+      _logger?.logLoginResult(identity: phone, channel: 'phone', success: true);
       return true;
     }
+    _logger?.logLoginResult(identity: phone, channel: 'phone', success: false, failureReason: 'invalid_credentials');
     return false;
   }
 
@@ -150,7 +166,12 @@ class NewAuthService {
     required String vehicleType,
     required String licenseNumber,
     required String nationalId,
+    Map<String, dynamic>? drivingLicenseFile,
+    Map<String, dynamic>? vehicleRegistrationFile,
+    Map<String, dynamic>? nonCriminalRecordFile,
   }) async {
+    // Log implicit code send (signup)
+    _logger?.logSendCode(identity: email, channel: 'email', purpose: 'signup', attempt: 1, cooldownSeconds: null);
     if (AppConfig.enableAWSIntegration) {
       try {
         final res = await Amplify.Auth.signUp(
@@ -210,7 +231,11 @@ class NewAuthService {
     required String vehicleType,
     required String licenseNumber,
     required String nationalId,
+    Map<String, dynamic>? drivingLicenseFile,
+    Map<String, dynamic>? vehicleRegistrationFile,
+    Map<String, dynamic>? nonCriminalRecordFile,
   }) async {
+    _logger?.logSendCode(identity: phone, channel: 'phone', purpose: 'signup', attempt: 1, cooldownSeconds: null);
     if (AppConfig.enableAWSIntegration) {
       try {
         final res = await Amplify.Auth.signUp(
@@ -263,6 +288,7 @@ class NewAuthService {
   Future<Map<String, dynamic>> sendPhoneVerification({
     required String phone,
   }) async {
+    _logger?.logSendCode(identity: phone, channel: 'phone', purpose: 'signup');
     if (AppConfig.enableAWSIntegration) {
       // In Cognito, code is sent during signUp; resending can be done via resendSignUpCode
       try {
@@ -291,34 +317,39 @@ class NewAuthService {
     required String phone,
     required String verificationCode,
   }) async {
-    if (AppConfig.enableAWSIntegration) {
-      try {
-        final res = await Amplify.Auth.confirmSignUp(
-          username: phone,
-          confirmationCode: verificationCode,
-        );
-        return {
-          'success': res.isSignUpComplete,
-          'verified': res.isSignUpComplete,
-          'message': res.isSignUpComplete
-              ? 'تم التحقق من رقم الهاتف'
-              : 'فشل التحقق',
-        };
-      } on AuthException catch (e) {
-        return {'success': false, 'verified': false, 'message': e.message};
+    // We'll log result after verifying
+    final result = await (() async {
+      if (AppConfig.enableAWSIntegration) {
+        try {
+          final res = await Amplify.Auth.confirmSignUp(
+            username: phone,
+            confirmationCode: verificationCode,
+          );
+          return {
+            'success': res.isSignUpComplete,
+            'verified': res.isSignUpComplete,
+            'message': res.isSignUpComplete
+                ? 'تم التحقق من رقم الهاتف'
+                : 'فشل التحقق',
+          };
+        } on AuthException catch (e) {
+          return {'success': false, 'verified': false, 'message': e.message};
+        }
       }
-    }
 
-    // Mock verify phone number
-    await Future.delayed(const Duration(milliseconds: 300));
-    final ok = verificationCode == '12345';
-    return {
-      'success': ok,
-      'verified': ok,
-      'message': ok
-          ? 'تم التحقق من رقم الهاتف'
-          : 'رمز التحقق غير صحيح (استخدم 12345)',
-    };
+      // Mock verify phone number
+      await Future.delayed(const Duration(milliseconds: 300));
+      final ok = verificationCode == '12345';
+      return {
+        'success': ok,
+        'verified': ok,
+        'message': ok
+            ? 'تم التحقق من رقم الهاتف'
+            : 'رمز التحقق غير صحيح (استخدم 12345)',
+      };
+    })();
+    _logger?.logVerifyCode(identity: phone, channel: 'phone', purpose: 'signup', success: result['success'] == true, failureReason: result['success'] == true ? null : 'code_mismatch');
+    return result;
   }
 
   static Future<bool> resetPasswordEmail({required String email}) async {
@@ -428,6 +459,7 @@ class NewAuthService {
     }
     await _clearToken();
     _webSocketService.disconnect();
+    _logger?.logLogout(identity: 'session'); // identity unknown (could fetch current user attributes if stored)
   }
 
   Future<void> _autoConnectWebSocket() async {
@@ -440,11 +472,15 @@ class NewAuthService {
 
   // Validators
   static bool isValidEmail(String email) {
-    return RegExp(r'^[\w\-.]+@([\w-]+\.)+[\w-]{2,4}\$').hasMatch(email);
+    return RegExp(r'^[\w\-.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(email);
   }
 
   static bool isValidIraqiPhone(String phone) {
-    return RegExp(r'^07[0-9]{9}\$').hasMatch(phone);
+    // Clean input - remove spaces and special characters
+    String cleanPhone = phone.replaceAll(RegExp(r'[^\d+]'), '');
+    
+    // Check if it matches Iraqi phone format: 07XXXXXXXXX (11 digits)
+    return RegExp(r'^07[0-9]{9}$').hasMatch(cleanPhone);
   }
 
   static String normalizeIraqiPhone(String phone) {

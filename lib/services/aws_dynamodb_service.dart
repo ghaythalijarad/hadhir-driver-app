@@ -1,12 +1,52 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 
 class AWSDynamoDBService {
   static final AWSDynamoDBService _instance = AWSDynamoDBService._internal();
   factory AWSDynamoDBService() => _instance;
   AWSDynamoDBService._internal();
 
-  /// Save driver registration data to DynamoDB
+  // Base URL for the new API Gateway HTTP API (set at runtime from config)
+  static String?
+  _baseUrl; // e.g., https://abc123.execute-api.us-east-1.amazonaws.com/dev
+  static String? _authToken; // Cognito access token (Bearer)
+
+  // Allow injecting a custom HTTP client for testing
+  static http.Client _client = http.Client();
+  static void setHttpClient(http.Client client) {
+    _client = client;
+  }
+
+  static void configure({required String baseUrl, required String authToken}) {
+    _baseUrl = baseUrl.endsWith('/')
+        ? baseUrl.substring(0, baseUrl.length - 1)
+        : baseUrl;
+    _authToken = authToken;
+  }
+
+  Map<String, String> get _headers {
+    final h = <String, String>{
+      HttpHeaders.acceptHeader: 'application/json',
+      HttpHeaders.contentTypeHeader: 'application/json',
+    };
+    if (_authToken != null && _authToken!.isNotEmpty) {
+      h[HttpHeaders.authorizationHeader] = 'Bearer $_authToken';
+    }
+    return h;
+  }
+
+  Uri _uri(String path) {
+    if (_baseUrl == null) {
+      throw StateError(
+        'AWSDynamoDBService not configured. Call configure(baseUrl, authToken).',
+      );
+    }
+    return Uri.parse('$_baseUrl$path');
+  }
+
+  // Save driver registration data (PUT /driver/me)
   Future<bool> saveDriverRegistration({
     required String driverId,
     required String email,
@@ -14,204 +54,151 @@ class AWSDynamoDBService {
     required Map<String, String> attributes,
   }) async {
     try {
-      debugPrint('DynamoDB - Saving driver registration data for: $email');
-
-      // Prepare driver data for DynamoDB
-      final driverData = {
-        'id': driverId,
-        'email': email,
-        'phone': phoneNumber,
+      debugPrint('DynamoDB API - Saving driver registration for: $driverId');
+      final body = {
         'name': attributes['name'] ?? '',
-        'idNumber': attributes['custom:idNumber'] ?? '',
-        'vehicleType': attributes['custom:vehicleType'] ?? '',
-        'vehiclePlate': attributes['custom:vehiclePlate'] ?? '',
-        'licensePlate': attributes['custom:licensePlate'] ?? '',
-        'status': 'pending_verification',
-        'isVerified': false,
-        'createdAt': DateTime.now().toIso8601String(),
-        'updatedAt': DateTime.now().toIso8601String(),
+        'city': attributes['city'] ?? '',
+        'vehicleType': attributes['vehicleType'] ?? '',
+        'licenseNumber': attributes['licenseNumber'] ?? '',
+        'nationalId': attributes['nationalId'] ?? '',
+        'docs': attributes['docs'] ?? '',
       };
+      // Only include status if caller explicitly supplied (allows baseline PENDING_PROFILE to remain)
+      final status = attributes['status'];
+      if (status != null && status.isNotEmpty) {
+        body['status'] = status;
+      }
 
-      // For now, we'll use a mock implementation that logs the data
-      // In a real implementation, this would use AWS SDK to save to DynamoDB
-      debugPrint('DynamoDB - Driver data to save: ${jsonEncode(driverData)}');
-
-      // Simulate network delay
-      await Future.delayed(const Duration(milliseconds: 500));
-
-      debugPrint('DynamoDB - Driver registration data saved successfully');
-      return true;
+      final resp = await _client.put(
+        _uri('/driver/me'),
+        headers: _headers,
+        body: jsonEncode(body),
+      );
+      debugPrint(
+        'DynamoDB API - PUT /driver/me -> ${resp.statusCode}: ${resp.body}',
+      );
+      if (resp.statusCode >= 200 && resp.statusCode < 300) return true;
+      return false;
     } catch (e) {
-      debugPrint('DynamoDB - Error saving driver registration: $e');
+      debugPrint('DynamoDB API - Error saveDriverRegistration: $e');
       return false;
     }
   }
 
-  /// Update driver location in DynamoDB
+  // Get driver profile with retry/backoff for eventual consistency
+  Future<Map<String, dynamic>?> getDriverProfile(
+    String driverId, {
+    int maxRetries = 5,
+  }) async {
+    int attempt = 0;
+    Duration delay = const Duration(milliseconds: 300);
+    while (true) {
+      attempt += 1;
+      try {
+        debugPrint('DynamoDB API - GET /driver/me (attempt $attempt)');
+        final resp = await _client.get(_uri('/driver/me'), headers: _headers);
+        if (resp.statusCode == 200) {
+          final data = jsonDecode(resp.body) as Map<String, dynamic>;
+          return data['data'] as Map<String, dynamic>? ?? data;
+        }
+        if (resp.statusCode == 404) {
+          debugPrint('DynamoDB API - Profile not found (404)');
+        } else {
+          debugPrint(
+            'DynamoDB API - GET failed ${resp.statusCode}: ${resp.body}',
+          );
+        }
+      } catch (e) {
+        debugPrint('DynamoDB API - Error getDriverProfile: $e');
+      }
+
+      if (attempt >= maxRetries) return null;
+      await Future.delayed(delay);
+      delay *= 2; // exponential backoff
+      if (delay > const Duration(seconds: 5))
+        delay = const Duration(seconds: 5);
+    }
+  }
+
+  // Update driver verification/status (PUT /driver/me)
+  Future<bool> updateDriverVerificationStatus({
+    required String driverId,
+    required bool isVerified,
+  }) async {
+    try {
+      final status = isVerified ? 'VERIFIED' : 'PENDING_REVIEW';
+      final resp = await _client.put(
+        _uri('/driver/me'),
+        headers: _headers,
+        body: jsonEncode({'status': status}),
+      );
+      debugPrint(
+        'DynamoDB API - update status -> ${resp.statusCode}: ${resp.body}',
+      );
+      return resp.statusCode >= 200 && resp.statusCode < 300;
+    } catch (e) {
+      debugPrint('DynamoDB API - Error updateDriverVerificationStatus: $e');
+      return false;
+    }
+  }
+
+  // Update driver profile fields (PUT /driver/me) without forcing status changes
+  Future<bool> updateDriverProfile(Map<String, dynamic> fields) async {
+    try {
+      // Filter out empty values to avoid overwriting with blanks
+      final body = <String, dynamic>{};
+      for (final entry in fields.entries) {
+        final v = entry.value;
+        if (v is String && v.isEmpty) continue;
+        if (v != null) body[entry.key] = v;
+      }
+      if (body.isEmpty) return true; // nothing to update
+
+      final resp = await _client.put(
+        _uri('/driver/me'),
+        headers: _headers,
+        body: jsonEncode(body),
+      );
+      debugPrint(
+        'DynamoDB API - update profile -> ${resp.statusCode}: ${resp.body}',
+      );
+      return resp.statusCode >= 200 && resp.statusCode < 300;
+    } catch (e) {
+      debugPrint('DynamoDB API - Error updateDriverProfile: $e');
+      return false;
+    }
+  }
+
+  // Location/status/earnings related endpoints are not part of this API yet; keep stubs
   Future<bool> updateDriverLocation({
     required String driverId,
     required double latitude,
     required double longitude,
     required String city,
   }) async {
-    try {
-      debugPrint('DynamoDB - Updating driver location for: $driverId');
-
-      final locationData = {
-        'driverId': driverId,
-        'latitude': latitude,
-        'longitude': longitude,
-        'city': city,
-        'isOnline': true,
-        'lastUpdated': DateTime.now().toIso8601String(),
-      };
-
-      debugPrint('DynamoDB - Location data to save: ${jsonEncode(locationData)}');
-
-      // Simulate network delay
-      await Future.delayed(const Duration(milliseconds: 300));
-
-      debugPrint('DynamoDB - Driver location updated successfully');
-      return true;
-    } catch (e) {
-      debugPrint('DynamoDB - Error updating driver location: $e');
-      return false;
-    }
+    debugPrint('DynamoDB API - updateDriverLocation stub');
+    return true;
   }
 
-  /// Get driver profile from DynamoDB
-  Future<Map<String, dynamic>?> getDriverProfile(String driverId) async {
-    try {
-      debugPrint('DynamoDB - Getting driver profile for: $driverId');
-
-      // Simulate network delay
-      await Future.delayed(const Duration(milliseconds: 500));
-
-      // Mock driver profile data
-      final profileData = {
-        'id': driverId,
-        'email': 'driver@example.com',
-        'phone': '+964770123456',
-        'name': 'أحمد محمد علي',
-        'idNumber': 'ID123456789',
-        'vehicleType': 'motorcycle',
-        'vehiclePlate': 'BGD-123',
-        'licensePlate': 'DL-456789',
-        'status': 'active',
-        'isVerified': true,
-        'rating': 4.8,
-        'totalDeliveries': 247,
-        'city': 'Baghdad',
-        'createdAt': '2024-01-15T10:30:00Z',
-        'updatedAt': DateTime.now().toIso8601String(),
-      };
-
-      debugPrint('DynamoDB - Driver profile retrieved: ${profileData['name']}');
-      return profileData;
-    } catch (e) {
-      debugPrint('DynamoDB - Error getting driver profile: $e');
-      return null;
-    }
-  }
-
-  /// Update driver verification status
-  Future<bool> updateDriverVerificationStatus({
-    required String driverId,
-    required bool isVerified,
-  }) async {
-    try {
-      debugPrint(
-        'DynamoDB - Updating verification status for: $driverId to $isVerified',
-      );
-
-      // Simulate network delay
-      await Future.delayed(const Duration(milliseconds: 400));
-
-      debugPrint('DynamoDB - Driver verification status updated successfully');
-      return true;
-    } catch (e) {
-      debugPrint('DynamoDB - Error updating verification status: $e');
-      return false;
-    }
-  }
-
-  /// Save order assignment to DynamoDB
   Future<bool> saveOrderAssignment({
     required String orderId,
     required String driverId,
     required Map<String, dynamic> orderDetails,
   }) async {
-    try {
-      debugPrint(
-        'DynamoDB - Saving order assignment: $orderId to driver: $driverId',
-      );
-
-      final orderData = {
-        'orderId': orderId,
-        'driverId': driverId,
-        'status': 'assigned',
-        'assignedAt': DateTime.now().toIso8601String(),
-        ...orderDetails,
-      };
-
-      debugPrint('DynamoDB - Order assignment data: ${jsonEncode(orderData)}');
-
-      // Simulate network delay
-      await Future.delayed(const Duration(milliseconds: 600));
-
-      debugPrint('DynamoDB - Order assignment saved successfully');
-      return true;
-    } catch (e) {
-      debugPrint('DynamoDB - Error saving order assignment: $e');
-      return false;
-    }
+    debugPrint('DynamoDB API - saveOrderAssignment stub');
+    return true;
   }
 
-  /// Get driver earnings from DynamoDB
   Future<Map<String, dynamic>?> getDriverEarnings(String driverId) async {
-    try {
-      debugPrint('DynamoDB - Getting driver earnings for: $driverId');
-
-      // Simulate network delay
-      await Future.delayed(const Duration(milliseconds: 500));
-
-      // Mock earnings data
-      final earningsData = {
-        'driverId': driverId,
-        'totalEarnings': 450000.0, // IQD
-        'todayEarnings': 75000.0,
-        'weeklyEarnings': 320000.0,
-        'monthlyEarnings': 1450000.0,
-        'totalOrders': 247,
-        'completedOrders': 240,
-        'currency': 'IQD',
-        'lastUpdated': DateTime.now().toIso8601String(),
-      };
-
-      debugPrint('DynamoDB - Driver earnings retrieved successfully');
-      return earningsData;
-    } catch (e) {
-      debugPrint('DynamoDB - Error getting driver earnings: $e');
-      return null;
-    }
+    debugPrint('DynamoDB API - getDriverEarnings stub');
+    return null;
   }
 
-  /// Update driver status (online/offline)
   Future<bool> updateDriverStatus({
     required String driverId,
     required String status,
   }) async {
-    try {
-      debugPrint('DynamoDB - Updating driver status for: $driverId to $status');
-
-      // Simulate network delay
-      await Future.delayed(const Duration(milliseconds: 300));
-
-      debugPrint('DynamoDB - Driver status updated successfully');
-      return true;
-    } catch (e) {
-      debugPrint('DynamoDB - Error updating driver status: $e');
-      return false;
-    }
+    debugPrint('DynamoDB API - updateDriverStatus stub');
+    return true;
   }
 }

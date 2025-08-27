@@ -2,35 +2,66 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:flutter/foundation.dart';
+import 'package:amplify_auth_cognito/amplify_auth_cognito.dart';
+import 'package:amplify_flutter/amplify_flutter.dart';
 import '../models/driver_profile.dart';
 import '../models/earnings.dart';
 import 'api_service.dart';
+import '../config/app_config.dart';
+import '../config/environment.dart';
+import 'aws_dynamodb_service.dart';
 
 class DriverService {
   static const String _baseUrl =
       'https://your-backend-url.com/api/v1'; // Replace with actual backend URL
 
-  // Initialize the service with default city
-  static void initialize() {
-    ApiService.setCity('baghdad'); // Default to Baghdad
-  } // Get driver profile
-
+  // Get driver profile exclusively via AWS when enabled
   static Future<DriverProfile?> getDriverProfile() async {
     try {
-      // Ensure city is set
-      initialize();
+      // If AWS integration is enabled, read from DynamoDB API
+      if (AppConfig.enableAWSIntegration) {
+        debugPrint('DriverService (AWS): Getting driver profile via HTTP API');
+        final session =
+            await Amplify.Auth.fetchAuthSession() as CognitoAuthSession;
+        if (!session.isSignedIn) {
+          debugPrint('DriverService (AWS): Not signed in');
+          return null;
+        }
+        final tokens = session.userPoolTokensResult.value;
+        AWSDynamoDBService.configure(
+          baseUrl: Environment.apiBaseUrl,
+          authToken: tokens.accessToken.raw,
+        );
 
-      debugPrint('DriverService: Getting driver profile...');
-      final response = await ApiService.getDriverProfile();
-      debugPrint('DriverService: API response: $response');
+        final data = await AWSDynamoDBService().getDriverProfile('self');
+        if (data == null) return null;
 
-      if (response['success'] == true && response['data'] != null) {
-        debugPrint('DriverService: Creating DriverProfile from JSON...');
-        final profile = DriverProfile.fromJson(response['data']);
-        debugPrint('DriverService: Profile created: ${profile.name}');
-        return profile;
+        // Map API response to DriverProfile JSON schema
+        final mapped = {
+          'id': data['driverId'] ?? '',
+          'name': data['name'] ?? '',
+          'phone': data['phone'] ?? '',
+          'email': data['email'] ?? '',
+          'city': data['city'] ?? '',
+          'vehicle_type': data['vehicleType'] ?? '',
+          'license_number': data['licenseNumber'] ?? '',
+          'national_id': data['nationalId'] ?? '',
+          'status': data['status'] ?? 'PENDING_PROFILE',
+          'join_date': DateTime.fromMillisecondsSinceEpoch(
+            ((data['createdAt'] ?? 0) as int) * 1000,
+          ).toIso8601String(),
+          'total_deliveries': 0,
+          'rating': 0.0,
+          'is_verified': (data['status'] == 'VERIFIED'),
+          'preferred_language': 'ar',
+        };
+        return DriverProfile.fromJson(mapped);
       }
-      debugPrint('DriverService: API response failed or no data');
+
+      // AWS disabled: legacy profile calls are deprecated
+      debugPrint(
+        'DriverService: AWS integration disabled; legacy profile API removed',
+      );
       return null;
     } catch (e) {
       debugPrint('Error fetching driver profile: $e');
@@ -38,25 +69,67 @@ class DriverService {
     }
   }
 
-  // Update driver profile
+  // Update driver profile exclusively via AWS when enabled
   static Future<bool> updateDriverProfile(DriverProfile profile) async {
     try {
-      final response = await http.put(
-        Uri.parse('$_baseUrl/driver/profile'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ${ApiService.authToken}',
-        },
-        body: jsonEncode(profile.toJson()),
-      );
+      if (AppConfig.enableAWSIntegration) {
+        debugPrint('DriverService (AWS): Updating driver profile via HTTP API');
+        final session =
+            await Amplify.Auth.fetchAuthSession() as CognitoAuthSession;
+        if (!session.isSignedIn) return false;
+        final tokens = session.userPoolTokensResult.value;
+        AWSDynamoDBService.configure(
+          baseUrl: Environment.apiBaseUrl,
+          authToken: tokens.accessToken.raw,
+        );
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['success'] ?? false;
+        final ok = await AWSDynamoDBService().updateDriverProfile({
+          'name': profile.name,
+          'city': profile.city,
+          'vehicleType': profile.vehicleType,
+          'licenseNumber': profile.licenseNumber,
+          'nationalId': profile.nationalId,
+        });
+        return ok;
       }
+
+      // AWS disabled: legacy profile API removed
+      debugPrint(
+        'DriverService: AWS integration disabled; legacy profile API removed',
+      );
       return false;
     } catch (e) {
       debugPrint('Error updating driver profile: $e');
+      return false;
+    }
+  }
+
+  // Update vehicle info (limited to supported fields in /driver/me)
+  static Future<bool> updateVehicleInfo(VehicleInfo vehicleInfo) async {
+    try {
+      if (AppConfig.enableAWSIntegration) {
+        debugPrint('DriverService (AWS): Updating vehicle info via HTTP API');
+        final session =
+            await Amplify.Auth.fetchAuthSession() as CognitoAuthSession;
+        if (!session.isSignedIn) return false;
+        final tokens = session.userPoolTokensResult.value;
+        AWSDynamoDBService.configure(
+          baseUrl: Environment.apiBaseUrl,
+          authToken: tokens.accessToken.raw,
+        );
+
+        // Backend currently supports updating vehicleType only
+        final ok = await AWSDynamoDBService().updateDriverProfile({
+          'vehicleType': vehicleInfo.type,
+        });
+        return ok;
+      }
+
+      // Legacy backend path (not supported in this build)
+      debugPrint('DriverService (legacy): updateVehicleInfo not supported');
+      return false;
+    } catch (e) {
+      debugPrint('Error updating vehicle info: $e');
       return false;
     }
   }
@@ -126,29 +199,6 @@ class DriverService {
       return false;
     } catch (e) {
       debugPrint('Error removing payment method: $e');
-      return false;
-    }
-  }
-
-  // Update vehicle information
-  static Future<bool> updateVehicleInfo(VehicleInfo vehicle) async {
-    try {
-      final response = await http.put(
-        Uri.parse('$_baseUrl/driver/vehicle'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ${ApiService.authToken}',
-        },
-        body: jsonEncode(vehicle.toJson()),
-      );
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['success'] ?? false;
-      }
-      return false;
-    } catch (e) {
-      debugPrint('Error updating vehicle info: $e');
       return false;
     }
   }

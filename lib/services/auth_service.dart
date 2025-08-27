@@ -460,55 +460,12 @@ class AuthService {
       return {'success': false, 'message': 'غير مخول'};
     }
 
-    // Use mock service in development mode
-    if (_isDevelopmentMode) {
-      await Future.delayed(const Duration(milliseconds: 500));
-
-      return {
-        'success': true,
-        'data': {
-          'id': 'driver_123',
-          'name': 'أحمد محمد علي',
-          'phone': '+964 770 123 4567',
-          'city': 'Baghdad',
-          'vehicle_type': 'motorcycle',
-          'license_number': 'DL123456789',
-          'national_id': 'ID987654321',
-          'status': 'active',
-          'is_verified': true,
-          'rating': 4.8,
-          'total_deliveries': 1247,
-          'created_at': '2023-01-15T10:30:00Z',
-        },
-      };
-    }
-
-    try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/driver/profile'),
-        headers: _headers,
-      );
-
-      // Enhanced logging
-      debugPrint('📞 GET /driver/profile');
-      debugPrint('   - Status Code: ${response.statusCode}');
-      debugPrint('   - Headers: $_headers');
-      debugPrint('   - Response Body: ${response.body}');
-
-      final data = jsonDecode(response.body);
-
-      if (response.statusCode == 200) {
-        // Ensure the response is wrapped in a standard format
-        return {'success': true, 'data': data};
-      } else {
-        return {
-          'success': false,
-          'message': data['message'] ?? 'فشل في جلب بيانات السائق',
-        };
-      }
-    } catch (e) {
-      return {'success': false, 'message': 'خطأ في الاتصال: ${e.toString()}'};
-    }
+    // Legacy profile endpoint deprecated. Use AWS Cognito + DynamoDB path instead.
+    return {
+      'success': false,
+      'message':
+          'تم إيقاف واجهة الملف الشخصي القديمة. الرجاء تفعيل تكامل AWS لاستخدام الملف الشخصي.',
+    };
   }
 
   /// Test backend connection

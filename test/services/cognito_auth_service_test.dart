@@ -13,6 +13,9 @@ class MockAmplify extends Mock implements AmplifyClass {}
 class MockAuthCategory extends Mock implements AuthCategory {}
 
 void main() {
+  // Skip complex Cognito flows until proper Amplify mocks are wired
+  const skipCognitoFlows = true;
+
   group('CognitoAuthService Tests', () {
     // late CognitoAuthService cognitoAuthService;
     // late MockAuthCategory mockAuth;
@@ -57,18 +60,18 @@ void main() {
         // Assertions would go here
         // expect(result['success'], isTrue);
         // expect(result['user_id'], equals('test-user-id'));
-      });
+      }, skip: skipCognitoFlows);
 
       test('should handle duplicate email registration', () async {
         // Test for duplicate email scenario
         // Mock AuthException for duplicate user
         // Verify proper Arabic error message is returned
-      });
+      }, skip: skipCognitoFlows);
 
       test('should validate password requirements', () async {
         // Test password policy validation
         // Verify proper Arabic error messages for weak passwords
-      });
+      }, skip: skipCognitoFlows);
     });
 
     group('Phone Registration', () {
@@ -83,12 +86,13 @@ void main() {
           // Verify phone number formatting
           // Verify SMS verification flow
         },
+        skip: skipCognitoFlows,
       );
 
       test('should handle invalid Iraqi phone format', () async {
         // Test invalid phone number formats
         // Verify proper validation and error messages
-      });
+      }, skip: skipCognitoFlows);
     });
 
     group('Login Tests', () {
@@ -96,18 +100,18 @@ void main() {
         // Test email login flow
         // Mock successful authentication
         // Verify token storage
-      });
+      }, skip: skipCognitoFlows);
 
       test('should successfully login with phone', () async {
         // Test phone login flow
         // Verify phone number normalization
         // Mock successful authentication
-      });
+      }, skip: skipCognitoFlows);
 
       test('should handle incorrect credentials', () async {
         // Test authentication failure
         // Verify proper error messages in Arabic
-      });
+      }, skip: skipCognitoFlows);
     });
 
     group('Profile Management', () {
@@ -115,7 +119,7 @@ void main() {
         // Test profile retrieval
         // Verify custom attributes are properly extracted
         // Verify driver-specific fields are included
-      });
+      }, skip: skipCognitoFlows);
     });
   });
 

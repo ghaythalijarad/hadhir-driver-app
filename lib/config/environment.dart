@@ -4,16 +4,16 @@ class Environment {
   static const bool isProduction = false;
   static String get environment => 'development';
 
-  // AWS Cognito Configuration - Updated for wizz-dev-users pool (Account: 031857856164)
+  // AWS Cognito Configuration - Updated for WhizzDrivers pool (Account: 031857856164)
   static const String awsRegion = 'us-east-1';
-  static const String cognitoUserPoolId = 'us-east-1_xDptXxzaI';
-  static const String cognitoUserPoolName = 'wizz-dev-users';
+  static const String cognitoUserPoolId = 'us-east-1_90UtBLIfK';
+  static const String cognitoUserPoolName = 'WhizzDrivers';
   static const String cognitoUserPoolArn =
-      'arn:aws:cognito-idp:us-east-1:031857856164:userpool/us-east-1_xDptXxzaI';
+      'arn:aws:cognito-idp:us-east-1:031857856164:userpool/us-east-1_90UtBLIfK';
 
-  // App Client ID from Cognito User Pool: wizz-dev-drivers-app
+  // App Client ID from Cognito User Pool: WhizzDrivers client
   static const String cognitoAppClientId =
-      'vjcumd2cck66kprpc86nmgs9t'; // wizz-dev-drivers-app client
+      '7s3rvcnp34fr2jp54jmksbdd0s'; // WhizzDrivers client
 
   // AWS Access Keys for services like SNS
   static const String awsAccessKeyId = 'YOUR_AWS_ACCESS_KEY_ID';
@@ -21,11 +21,11 @@ class Environment {
 
   // API endpoints (update these with your actual backend URLs when available)
   static const String apiBaseUrl =
-      'https://your-api-gateway.execute-api.us-east-1.amazonaws.com/dev';
+      'https://yv7qnba4a5.execute-api.us-east-1.amazonaws.com/dev';
 
-  // WebSocket URL (update with your actual WebSocket endpoint)
+  // WebSocket URL (update with unified driver/users/merchants/admin channel)
   static String get webSocketUrl =>
-      'wss://your-websocket-endpoint.execute-api.us-east-1.amazonaws.com/dev';
+      'wss://rydaqvx17c.execute-api.us-east-1.amazonaws.com/Dev'; // unified WS (authorizer: wizzgo-dev-wss-authorizer)
 
   // Regional defaults
   static const String defaultCountryCode = '+964';

@@ -101,30 +101,33 @@ class _IdentityVerificationScreenState
 
   Widget _buildStatusHeader() {
     final isVerified = _driverProfile?.isVerified ?? false;
-    final status = _driverProfile?.status ?? 'pending';
+    final status = (_driverProfile?.status ?? '').toString();
 
     Color statusColor;
     IconData statusIcon;
     String statusText;
     String statusDescription;
 
-    if (isVerified) {
+    final normalized = status.toUpperCase();
+
+    if (isVerified || normalized == 'VERIFIED') {
       statusColor = AppColors.success;
       statusIcon = Icons.verified_user;
       statusText = 'Verified';
       statusDescription = 'Your identity has been successfully verified.';
-    } else if (status == 'under_review') {
+    } else if (normalized == 'PENDING_REVIEW' || normalized == 'UNDER_REVIEW') {
       statusColor = AppColors.warning;
       statusIcon = Icons.hourglass_empty;
       statusText = 'Under Review';
       statusDescription =
           'Your documents are being reviewed. This may take 1-3 business days.';
-    } else if (status == 'rejected') {
+    } else if (normalized == 'REJECTED') {
       statusColor = AppColors.error;
       statusIcon = Icons.error;
       statusText = 'Verification Failed';
       statusDescription = 'Please review and resubmit your documents.';
     } else {
+      // Default includes PENDING_PROFILE or unknown
       statusColor = AppColors.grey400;
       statusIcon = Icons.pending;
       statusText = 'Pending';

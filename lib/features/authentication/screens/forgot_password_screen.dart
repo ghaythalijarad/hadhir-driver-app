@@ -1,42 +1,40 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../services/verification_throttle_service.dart';
+import '../utils/identity_normalizer.dart';
+import '../widgets/verification_code_input.dart';
+import '../../../services/logging/auth_logger.dart';
 import '../../../app_colors.dart';
 import '../../../services/auth_service.dart';
 
-class ForgotPasswordScreen extends StatefulWidget {
+class ForgotPasswordScreen extends ConsumerStatefulWidget {
   const ForgotPasswordScreen({super.key});
 
   @override
-  State<ForgotPasswordScreen> createState() => _ForgotPasswordScreenState();
+  ConsumerState<ForgotPasswordScreen> createState() => _ForgotPasswordScreenState();
 }
 
-class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
+class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
   final _phoneController = TextEditingController();
-  final _codeControllers = List.generate(5, (index) => TextEditingController());
-  final _codeNodes = List.generate(5, (index) => FocusNode());
   final _newPasswordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
 
   bool _isLoading = false;
-  bool _isResending = false;
+  bool _isResending = false; // maintained for button state
   bool _codeSent = false;
   bool _codeVerified = false;
   bool _obscureNewPassword = true;
   bool _obscureConfirmPassword = true;
-  int _resendCooldown = 0;
+  String _currentCode = ''; // holds latest OTP input
+  Key _otpKey = UniqueKey();
+  String? _normalizedPhone; // set upon first send
 
   @override
   void dispose() {
     _phoneController.dispose();
     _newPasswordController.dispose();
     _confirmPasswordController.dispose();
-    for (var controller in _codeControllers) {
-      controller.dispose();
-    }
-    for (var node in _codeNodes) {
-      node.dispose();
-    }
     super.dispose();
   }
 
@@ -63,16 +61,48 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
       return;
     }
 
+    final phoneRaw = _phoneController.text.trim();
+    _normalizedPhone = IdentityNormalizer.normalizeIraqiPhone(phoneRaw);
+    final throttleNotifier = ref.read(verificationThrottleProvider.notifier);
+    final throttleState = ref.read(verificationThrottleProvider).identityState(_normalizedPhone!);
+    if (throttleState.cooldownRemaining > 0 || throttleState.isSending) {
+      return; // ignore spam taps
+    }
+    throttleNotifier.setSending(_normalizedPhone!, true);
     setState(() {
       _isLoading = true;
     });
 
     try {
-      await AuthService.sendVerificationCode(_phoneController.text.trim());
+      final result = await AuthService.sendVerificationCode(phoneRaw);
+      if (result['success'] == true) {
+        throttleNotifier.recordSend(_normalizedPhone!);
+        AuthLogger().logSendCode(
+          identity: _normalizedPhone!,
+          channel: 'phone',
+          purpose: 'password_reset',
+          attempt: ref.read(verificationThrottleProvider).identityState(_normalizedPhone!).recentSends.length,
+          cooldownSeconds: ref.read(verificationThrottleProvider).identityState(_normalizedPhone!).currentCooldownDuration,
+        );
+      } else {
+        throttleNotifier.setError(_normalizedPhone!, result['message'] ?? 'فشل في إرسال الرمز');
+        AuthLogger().logSendCode(
+          identity: _normalizedPhone!,
+          channel: 'phone',
+          purpose: 'password_reset',
+          attempt: ref.read(verificationThrottleProvider).identityState(_normalizedPhone!).recentSends.length + 1,
+          cooldownSeconds: ref.read(verificationThrottleProvider).identityState(_normalizedPhone!).currentCooldownDuration,
+        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(result['message'] ?? 'فشل في إرسال رمز التحقق'), backgroundColor: AppColors.error),
+          );
+        }
+        return;
+      }
       setState(() {
         _codeSent = true;
       });
-      _startResendCooldown();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -92,6 +122,9 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
         );
       }
     } finally {
+      if (_normalizedPhone != null) {
+        throttleNotifier.setSending(_normalizedPhone!, false);
+      }
       if (mounted) {
         setState(() {
           _isLoading = false;
@@ -100,30 +133,13 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     }
   }
 
-  void _startResendCooldown() {
-    setState(() {
-      _resendCooldown = 60;
-    });
-
-    Future.doWhile(() async {
-      await Future.delayed(const Duration(seconds: 1));
-      if (mounted) {
-        setState(() {
-          _resendCooldown--;
-        });
-        return _resendCooldown > 0;
-      }
-      return false;
-    });
-  }
+  bool get _isCodeComplete => _currentCode.length == 6 && _currentCode.replaceAll(RegExp(r'\D'), '').length == 6; // standardized to 6 digits
 
   Future<void> _verifyCode() async {
-    final code = _codeControllers.map((c) => c.text).join();
-
-    if (code.length != 5) {
+    if (!_isCodeComplete) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('يرجى إدخال رمز التحقق المكون من 5 أرقام'),
+          content: Text('يرجى إدخال رمز التحقق المكون من 6 أرقام'),
           backgroundColor: AppColors.error,
         ),
       );
@@ -137,13 +153,21 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     try {
       final result = await AuthService.verifyPhone(
         phone: _phoneController.text.trim(),
-        code: code,
+        code: _currentCode,
       );
 
       if (result['success']) {
         setState(() {
           _codeVerified = true;
         });
+        if (_normalizedPhone != null) {
+          AuthLogger().logVerifyCode(
+            identity: _normalizedPhone!,
+            channel: 'phone',
+            purpose: 'password_reset',
+            success: true,
+          );
+        }
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -160,14 +184,29 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
               backgroundColor: AppColors.error,
             ),
           );
-          // Clear the code fields
-          for (var controller in _codeControllers) {
-            controller.clear();
+          // reset OTP widget
+          setState(() { _otpKey = UniqueKey(); _currentCode = ''; });
+          if (_normalizedPhone != null) {
+            AuthLogger().logVerifyCode(
+              identity: _normalizedPhone!,
+              channel: 'phone',
+              purpose: 'password_reset',
+              success: false,
+              failureReason: 'code_mismatch',
+            );
           }
-          _codeNodes[0].requestFocus();
         }
       }
     } catch (e) {
+      if (_normalizedPhone != null) {
+        AuthLogger().logVerifyCode(
+          identity: _normalizedPhone!,
+          channel: 'phone',
+          purpose: 'password_reset',
+          success: false,
+          failureReason: 'exception',
+        );
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -221,7 +260,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     });
 
     try {
-      final code = _codeControllers.map((c) => c.text).join();
+      final code = _currentCode; // use captured OTP instead of removed _codeControllers
       final result = await AuthService.resetPassword(
         phone: _phoneController.text.trim(),
         code: code,
@@ -267,15 +306,38 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   }
 
   Future<void> _resendCode() async {
-    if (_resendCooldown > 0 || _isResending) return;
+    if (_normalizedPhone == null) return; // can't resend before first send
+    final identity = _normalizedPhone!;
+    final throttle = ref.read(verificationThrottleProvider);
+    final state = throttle.identityState(identity);
+    if (state.cooldownRemaining > 0 || state.isSending) return;
 
     setState(() {
       _isResending = true;
     });
 
     try {
-      await AuthService.sendVerificationCode(_phoneController.text.trim());
-      _startResendCooldown();
+      final result = await AuthService.sendVerificationCode(_phoneController.text.trim());
+      final notifier = ref.read(verificationThrottleProvider.notifier);
+      if (result['success'] == true) {
+        notifier.recordSend(identity);
+        AuthLogger().logSendCode(
+          identity: identity,
+          channel: 'phone',
+          purpose: 'password_reset',
+          attempt: ref.read(verificationThrottleProvider).identityState(identity).recentSends.length,
+          cooldownSeconds: ref.read(verificationThrottleProvider).identityState(identity).currentCooldownDuration,
+        );
+      } else {
+        notifier.setError(identity, result['message'] ?? 'فشل في إعادة الإرسال');
+        AuthLogger().logSendCode(
+          identity: identity,
+          channel: 'phone',
+          purpose: 'password_reset',
+          attempt: ref.read(verificationThrottleProvider).identityState(identity).recentSends.length + 1,
+          cooldownSeconds: ref.read(verificationThrottleProvider).identityState(identity).currentCooldownDuration,
+        );
+      }
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -303,26 +365,18 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     }
   }
 
-  void _onCodeChanged(String value, int index) {
-    if (value.isNotEmpty) {
-      if (index < 4) {
-        _codeNodes[index + 1].requestFocus();
-      } else {
-        _codeNodes[index].unfocus();
-        _verifyCode();
-      }
-    }
-  }
-
-  void _onBackspace(int index) {
-    if (index > 0) {
-      _codeControllers[index - 1].clear();
-      _codeNodes[index - 1].requestFocus();
+  void _onOtpChanged(String code) {
+    setState(() { _currentCode = code; });
+    if (_isCodeComplete && !_codeVerified) {
+      _verifyCode();
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final cooldown = _normalizedPhone == null
+        ? 0
+        : ref.watch(verificationThrottleProvider).identityState(_normalizedPhone!).cooldownRemaining;
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
@@ -405,102 +459,31 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
                 ),
               ] else ...[
                 // OTP input fields
-                const Text(
-                  'رمز التحقق',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.textPrimary,
-                  ),
-                ),
+                const Text('رمز التحقق', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
                 const SizedBox(height: 8),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: List.generate(5, (index) {
-                    return SizedBox(
-                      width: 50,
-                      height: 60,
-                      child: TextFormField(
-                        controller: _codeControllers[index],
-                        focusNode: _codeNodes[index],
-                        enabled: !_codeVerified,
-                        textAlign: TextAlign.center,
-                        keyboardType: TextInputType.number,
-                        maxLength: 1,
-                        style: const TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                        ),
-                        decoration: InputDecoration(
-                          counterText: '',
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(8),
-                            borderSide: const BorderSide(
-                              color: AppColors.border,
-                            ),
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(8),
-                            borderSide: const BorderSide(
-                              color: AppColors.primary,
-                              width: 2,
-                            ),
-                          ),
-                          filled: true,
-                          fillColor: _codeVerified
-                              ? AppColors.success.withValues(alpha: 0.1)
-                              : AppColors.white,
-                        ),
-                        inputFormatters: [
-                          FilteringTextInputFormatter.digitsOnly,
-                        ],
-                        onChanged: (value) => _onCodeChanged(value, index),
-                        onTap: () {
-                          _codeControllers[index].selection =
-                              TextSelection.fromPosition(
-                                TextPosition(
-                                  offset: _codeControllers[index].text.length,
-                                ),
-                              );
-                        },
-                        onEditingComplete: () {
-                          if (_codeControllers[index].text.isEmpty &&
-                              index > 0) {
-                            _onBackspace(index);
-                          }
-                        },
-                      ),
-                    );
-                  }),
+                VerificationCodeInput(
+                  key: _otpKey,
+                  length: 6, // switched to 6-digit standard
+                  enabled: !_codeVerified && !_isLoading,
+                  onChanged: _onOtpChanged,
+                  autoSubmit: false,
                 ),
                 const SizedBox(height: 16),
 
                 // Resend code
-                if (_resendCooldown > 0)
-                  Text(
-                    'يمكنك إعادة الإرسال خلال $_resendCooldown ثانية',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      color: AppColors.textSecondary,
-                      fontSize: 14,
-                    ),
-                  )
-                else
-                  TextButton(
-                    onPressed: _isResending || _codeVerified
-                        ? null
-                        : _resendCode,
-                    child: _isResending
-                        ? const CircularProgressIndicator()
-                        : const Text(
-                            'إعادة إرسال الرمز',
-                            style: TextStyle(
-                              color: AppColors.primary,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                            ),
+                TextButton(
+                  onPressed: (_isResending || _codeVerified || cooldown > 0) ? null : _resendCode,
+                  child: _isResending
+                      ? const CircularProgressIndicator()
+                      : Text(
+                          cooldown > 0 ? 'إعادة الإرسال خلال ${cooldown}s' : 'إعادة إرسال الرمز',
+                          style: const TextStyle(
+                            color: AppColors.primary,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
                           ),
-                  ),
+                        ),
+                ),
 
                 if (_codeVerified) ...[
                   const SizedBox(height: 24),

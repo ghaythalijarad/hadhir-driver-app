@@ -1,46 +1,40 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import '../providers/auth_provider.dart';
 import '../app_colors.dart';
+import '../providers/riverpod/services_provider.dart';
 
-class AuthGuard extends StatelessWidget {
+/// Riverpod-based auth guard replacing legacy ChangeNotifier implementation.
+class AuthGuard extends ConsumerWidget {
   final Widget child;
 
   const AuthGuard({super.key, required this.child});
 
   @override
-  Widget build(BuildContext context) {
-    return Consumer<AuthProvider>(
-      builder: (context, authProvider, _) {
-        if (authProvider.isLoading) {
-          return const Scaffold(
-            backgroundColor: AppColors.background,
-            body: Center(
-              child: CircularProgressIndicator(color: AppColors.primary),
-            ),
-          );
-        }
+  Widget build(BuildContext context, WidgetRef ref) {
+    final authService = ref.watch(authServiceProvider);
 
-        if (!authProvider.isAuthenticated) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            context.go('/login');
-          });
-          return const Scaffold(
-            backgroundColor: AppColors.background,
-            body: Center(
-              child: CircularProgressIndicator(color: AppColors.primary),
-            ),
-          );
-        }
+    // For simplicity, assume no loading state for now
+    // TODO: Add loading state if needed
+    if (!authService.isAuthenticated) {
+      // Schedule navigation to avoid setState during build / multiple pushes
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) context.go('/login');
+      });
+      return const Scaffold(
+        backgroundColor: AppColors.background,
+        body: Center(
+          child: CircularProgressIndicator(color: AppColors.primary),
+        ),
+      );
+    }
 
-        return child;
-      },
-    );
+    return child;
   }
 }
 
-class AuthWrapper extends StatelessWidget {
+/// Wrapper that chooses between authenticated / unauthenticated child widgets.
+class AuthWrapper extends ConsumerWidget {
   final Widget authenticatedChild;
   final Widget unauthenticatedChild;
 
@@ -51,43 +45,11 @@ class AuthWrapper extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    return Consumer<AuthProvider>(
-      builder: (context, authProvider, _) {
-        if (authProvider.isLoading) {
-          return const Scaffold(
-            backgroundColor: AppColors.background,
-            body: Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.delivery_dining,
-                    size: 80,
-                    color: AppColors.primary,
-                  ),
-                  SizedBox(height: 24),
-                  CircularProgressIndicator(color: AppColors.primary),
-                  SizedBox(height: 16),
-                  Text(
-                    'جاري التحقق من الحساب...',
-                    style: TextStyle(
-                      fontSize: 16,
-                      color: AppColors.textSecondary,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        }
+  Widget build(BuildContext context, WidgetRef ref) {
+    final authService = ref.watch(authServiceProvider);
 
-        if (authProvider.isAuthenticated) {
-          return authenticatedChild;
-        } else {
-          return unauthenticatedChild;
-        }
-      },
-    );
+    return authService.isAuthenticated
+        ? authenticatedChild
+        : unauthenticatedChild;
   }
 }
