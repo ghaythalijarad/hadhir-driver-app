@@ -123,10 +123,8 @@ class _SSOEmailTestScreenState extends State<SSOEmailTestScreen> {
       // Method 2: Try updating email attribute (triggers verification)
       try {
         await Amplify.Auth.updateUserAttribute(
-          userAttribute: AuthUserAttribute(
-            userAttributeKey: AuthUserAttributeKey.email,
-            value: email,
-          ),
+          userAttributeKey: AuthUserAttributeKey.email,
+          value: email,
         );
         _log('✅ Email attribute update initiated (should send verification code)');
         _log('🔍 Check email inbox for verification code');
